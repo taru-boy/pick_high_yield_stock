@@ -4,6 +4,8 @@ from datetime import datetime, timedelta
 from time import sleep
 
 import pandas as pd
+import requests
+from bs4 import BeautifulSoup
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
@@ -21,62 +23,45 @@ def calculate_dividend_yield(codes, sector_dict):
         codes (list): 証券コードのリスト
         sector_dict (dict): 証券コードとセクターの対応辞書
     """
-    driver = setup_driver()
     base_url = "https://www.nikkei.com/nkd/company/?scode="
     data = []
 
-    try:
-        for code in codes:
-            url = base_url + str(code)
-            driver.get(url)
+    for code in codes:
+        url = base_url + str(code)
+        responce = requests.get(url)
+        soup = BeautifulSoup(responce.text, "html.parser")
 
-            # 動的な要素の待機
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located(
-                    (By.CSS_SELECTOR, "h1.m-headlineLarge_text")
-                )
+        company_name = soup.select_one("h1.m-headlineLarge_text").text
+        stock_price = soup.select_one("dd.m-stockPriceElm_value").text
+        try:
+            stock_price = float(
+                re.search(r"[\d,]+", stock_price).group().replace(",", "")
             )
+        except AttributeError as e:
+            today = datetime.now().strftime("%Y-%m-%d")
+            logging.error(f"{today}:{code} {company_name} {e}")
+            stock_price = None
+        dividend = soup.select_one(
+            "div.m-stockInfo_detail_right li:nth-child(3) span.m-stockInfo_detail_value"
+        ).text
+        try:
+            dividend_yield = float(re.search(r"(\d+(\.\d+)?)", dividend).group())
+        except AttributeError as e:
+            today = datetime.now().strftime("%Y-%m-%d")
+            logging.error(f"{today}:{code} {company_name} {e}")
+            dividend_yield = None
 
-            company_name = driver.find_element(
-                By.CSS_SELECTOR, "h1.m-headlineLarge_text"
-            ).text
-            stock_price = driver.find_element(
-                By.CSS_SELECTOR, "dd.m-stockPriceElm_value"
-            ).text
-            try:
-                stock_price = float(
-                    re.search(r"[\d,]+", stock_price).group().replace(",", "")
-                )
-            except AttributeError as e:
-                today = datetime.now().strftime("%Y-%m-%d")
-                logging.error(f"{today}:{code} {company_name} {e}")
-                stock_price = None
-            dividend_element = driver.find_element(
-                By.CSS_SELECTOR,
-                "div.m-stockInfo_detail_right li:nth-child(3) span.m-stockInfo_detail_value",
-            )
-            try:
-                dividend_yield = float(
-                    re.search(r"(\d+(\.\d+)?)", dividend_element.text).group()
-                )
-            except AttributeError as e:
-                today = datetime.now().strftime("%Y-%m-%d")
-                logging.error(f"{today}:{code} {company_name} {e}")
-                dividend_yield = None
-
-            sector = sector_dict.get(code, "Unknown")
-            data.append(
-                {
-                    "証券コード": code,
-                    "セクター": sector,
-                    "配当利回り(%)": dividend_yield,
-                    "会社名": company_name,
-                    "株価": stock_price,
-                    "URL": url,
-                }
-            )
-    finally:
-        driver.quit()
+        sector = sector_dict.get(code, "Unknown")
+        data.append(
+            {
+                "証券コード": code,
+                "セクター": sector,
+                "配当利回り(%)": dividend_yield,
+                "会社名": company_name,
+                "株価": stock_price,
+                "URL": url,
+            }
+        )
 
     df = pd.DataFrame(data)
     df = df.sort_values(by="配当利回り(%)", ascending=False)
