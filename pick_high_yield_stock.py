@@ -10,6 +10,9 @@ from google.oauth2.service_account import Credentials
 # 高配当株のコードを取得する関数をインポート
 from get_high_dividend_stock_code import get_high_dividend_stock_codes
 
+# 保有銘柄の計算関数をインポート
+from holding_calculator import calculate_latest_holdings, get_holding_sector_dict
+
 # 銘柄選定関数をインポート
 from stock_selector import select_stock
 
@@ -37,12 +40,28 @@ credentials = Credentials.from_service_account_file(json_file, scopes=scope)
 # gspreadを使用してGoogle Sheets APIに認証
 gc = gspread.authorize(credentials)
 
+
+def update_worksheet_with_holdings(gc, spreadsheet_key, df_latest_holdings):
+    """
+    並べ替えた保有銘柄データを「時価総額」シートに書き込む。
+    """
+    worksheet = gc.open_by_key(spreadsheet_key).worksheet("時価総額")
+    worksheet.clear()
+    worksheet.update(
+        values=[df_latest_holdings.columns.to_list()]
+        + df_latest_holdings.values.tolist(),
+        range_name="A1",
+    )
+
+
 # 「購入履歴」シートを開き、データを取得
 worksheet = gc.open_by_key(spreadsheet_key).worksheet("購入履歴")
 data = worksheet.get_all_values()
 
 # データをPandasデータフレームに変換
 df_holding = pd.DataFrame(data[1:], columns=data[0])
+df_latest_holdings = pd.DataFrame()
+sector_order = []
 
 if not df_holding.empty:
     # データ型を適切に変換（数値型に変換可能な列を変換）
@@ -53,65 +72,17 @@ if not df_holding.empty:
     # 証券コードごとに保有株数を集計
     df_holding_number = df_holding.groupby("証券コード", as_index=False)["株数"].sum()
 
-    # 保有銘柄の時価総額を計算するための準備
+    # 保有銘柄のセクター辞書を作成
     codes = list(df_holding["証券コード"].unique())
-    holding_sector_dict = {}
+    holding_sector_dict = get_holding_sector_dict(df_holding, codes)
 
-    # 各証券コードに対応するセクターを辞書に格納
-    for _code in codes:
-        _sector = df_holding[df_holding["証券コード"] == _code]["セクター"].values[0]
-        holding_sector_dict[_code] = _sector
-
-    # 最新の株価データを取得し、データフレームを作成
-    df_latest_holdings = calculate_dividend_yield(
-        codes=codes, sector_dict=holding_sector_dict
+    # 最新の保有銘柄データを計算
+    df_latest_holdings, sector_order = calculate_latest_holdings(
+        df_holding, df_holding_number, codes, holding_sector_dict
     )
-    df_latest_holdings.drop(columns=["配当利回り(%)", "URL"], inplace=True)
-    df_latest_holdings.to_csv("latest_holdings.csv", index=False, encoding="utf-8")
-    df_latest_holdings = pd.read_csv("latest_holdings.csv")
-    df_latest_holdings["合計株数"] = 0
-
-    # 各銘柄の合計株数を計算し、データフレームに反映
-    for _index, _stock in df_latest_holdings.iterrows():
-        _code = _stock["証券コード"]
-        _matching_row = df_holding_number[df_holding_number["証券コード"] == _code]
-        if not _matching_row.empty:
-            df_latest_holdings.at[_index, "合計株数"] = _matching_row["株数"].values[0]
-
-    # 各銘柄の時価総額を計算
-    df_latest_holdings["時価総額"] = (
-        df_latest_holdings["株価"] * df_latest_holdings["合計株数"]
-    ).astype(int)
-
-    # セクターごとの合計時価総額を計算
-    sector_total_market_cap = (
-        df_latest_holdings.groupby("セクター")["時価総額"]
-        .sum()
-        .sort_values(ascending=False)
-    )
-
-    # セクターの順序を時価総額の降順に設定
-    sector_order = sector_total_market_cap.index.tolist()
-
-    # セクターごとに並べ替え、セクター内は時価総額の降順に並べ替え
-    df_latest_holdings["セクター順序"] = df_latest_holdings["セクター"].apply(
-        lambda x: sector_order.index(x)
-    )
-    df_latest_holdings = df_latest_holdings.sort_values(
-        by=["セクター順序", "時価総額"], ascending=[True, False]
-    )
-
-    # 並べ替えに使用した列を削除
-    df_latest_holdings.drop(columns=["セクター順序"], inplace=True)
 
     # 並べ替えたデータを「時価総額」シートに書き込む
-    worksheet = gc.open_by_key(spreadsheet_key).worksheet("時価総額")
-    worksheet.clear()
-    worksheet.update(
-        values=[df_latest_holdings.columns.to_list()]
-        + df_latest_holdings.values.tolist(),
-        range_name="A1",
-    )
+    update_worksheet_with_holdings(gc, spreadsheet_key, df_latest_holdings)
 
 
 # 最新の配当データを取得し、データフレームを作成

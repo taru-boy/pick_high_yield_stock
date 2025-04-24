@@ -43,10 +43,14 @@ def calculate_dividend_yield(codes, sector_dict):
             stock_price = driver.find_element(
                 By.CSS_SELECTOR, "dd.m-stockPriceElm_value"
             ).text
-            stock_price = float(
-                re.search(r"[\d,]+", stock_price).group().replace(",", "")
-            )
-
+            try:
+                stock_price = float(
+                    re.search(r"[\d,]+", stock_price).group().replace(",", "")
+                )
+            except AttributeError as e:
+                today = datetime.now().strftime("%Y-%m-%d")
+                logging.error(f"{today}:{code} {company_name} {e}")
+                stock_price = None
             dividend_element = driver.find_element(
                 By.CSS_SELECTOR,
                 "div.m-stockInfo_detail_right li:nth-child(3) span.m-stockInfo_detail_value",
