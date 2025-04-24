@@ -20,7 +20,7 @@ from stock_selector import select_stock
 from watch_dividend import calculate_dividend_yield, create_latest_dividend_dataframe
 
 # 環境変数を読み込む
-load_dotenv(dotenv_path=".env")
+load_dotenv(dotenv_path="/home/taru-boy/Desktop/get_stock/.env")
 
 # スプレッドシートのキーを環境変数から取得
 spreadsheet_key = os.getenv("SPREADSHEET_KEY")
@@ -93,7 +93,7 @@ df_stocks = create_latest_dividend_dataframe(
     high_dividend_codes, progressive_codes, consecutive_codes, sector_dict
 )
 
-df_stocks = pd.read_csv("high_dividend_stocks.csv")
+df_stocks = pd.read_csv("/home/taru-boy/Desktop/get_stock/high_dividend_stocks.csv")
 df_stocks.sort_values(by="配当利回り(%)", ascending=False, inplace=True)
 
 # 並べ替えたデータを「今週の銘柄」シートに書き込む

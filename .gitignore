@@ -5,3 +5,4 @@
 *.csv
 *.json
 __pycache__
+test.py

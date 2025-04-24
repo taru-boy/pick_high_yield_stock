@@ -110,7 +110,11 @@ def create_latest_dividend_dataframe(
     df_all = pd.concat(
         [df_high_dividend, df_progressive, df_consecutive], ignore_index=True
     )
-    df_all.to_csv("high_dividend_stocks.csv", index=False, encoding="utf-8")
+    df_all.to_csv(
+        "/home/taru-boy/Desktop/get_stock/high_dividend_stocks.csv",
+        index=False,
+        encoding="utf-8",
+    )
     print("配当利回りの計算が完了しました。")
     return df_all
 
