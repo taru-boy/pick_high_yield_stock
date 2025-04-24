@@ -1,5 +1,6 @@
 import math
 import os
+import time
 from datetime import datetime
 
 import gspread
@@ -18,6 +19,8 @@ from stock_selector import select_stock
 
 # 最新の配当データフレームを作成する関数をインポート
 from watch_dividend import calculate_dividend_yield, create_latest_dividend_dataframe
+
+start_time = time.time()
 
 # 環境変数を読み込む
 load_dotenv(dotenv_path="/home/taru-boy/Desktop/get_stock/.env")
@@ -131,3 +134,7 @@ if picked_stock is not None:
     )
 else:
     print("適切な銘柄が見つかりませんでした。")
+
+end_time = time.time()
+execution_time = end_time - start_time
+print(f"スクリプトの実行時間: {execution_time:.2f}秒")
