@@ -120,7 +120,7 @@ if picked_stock is not None:
 
     # 購入履歴に追加
     today = datetime.today().strftime("%Y-%m-%d")
-    amount = math.ceil(2000 / picked_price)
+    amount = math.ceil(5000 / picked_price)
     worksheet = gc.open_by_key(spreadsheet_key).worksheet("購入履歴")
     worksheet.append_row(
         [
