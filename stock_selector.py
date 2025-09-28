@@ -27,9 +27,9 @@ def pick_stock_by_duplicates(df_stocks, held_sector):
     return None
 
 
-def pick_stock_by_low_market_cap(df_stocks, df_latest_holdings):
+def pick_stock_in_holding_sector(df_stocks, df_latest_holdings):
     """
-    時価総額の低いセクターから銘柄を選定する。
+    対象銘柄の保有比率が高すぎない範囲で高配当銘柄を選定する。
     """
     df_yield = df_stocks.head(5)
     duplicate_codes = df_stocks["証券コード"].value_counts()
@@ -39,20 +39,16 @@ def pick_stock_by_low_market_cap(df_stocks, df_latest_holdings):
     temp_df = pd.concat([df_yield, df_duplicates], ignore_index=True)
     temp_df = temp_df.drop(columns=["URL", "指数"])
     total_cap = df_latest_holdings["時価総額"].sum()
-    print(total_cap)
     for _, stock in temp_df.iterrows():
         sector = stock["セクター"]
         code = stock["証券コード"]
-        print(sector, code)
         stock_cap = df_latest_holdings[df_latest_holdings["証券コード"] == code][
             "時価総額"
         ].sum()
-        print(stock_cap)
         if stock_cap > total_cap * 0.05:
             continue
         sector_stocks = df_latest_holdings[df_latest_holdings["セクター"] == sector]
         sector_cap = sector_stocks["時価総額"].sum()
-        print(sector_cap)
         if sector_cap < total_cap * 0.2:
             return stock
     return None
@@ -72,8 +68,8 @@ def select_stock(df_stocks, df_latest_holdings, held_sector):
     if stock is not None:
         return stock
 
-    # 時価総額の低いセクターから選定
-    stock = pick_stock_by_low_market_cap(df_stocks, df_latest_holdings)
+    # 保有済みセクターから高配当銘柄を選定
+    stock = pick_stock_in_holding_sector(df_stocks, df_latest_holdings)
     if stock is not None:
         return stock
 
