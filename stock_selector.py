@@ -3,9 +3,11 @@ import pandas as pd
 
 def pick_stock_by_yield(df_stocks, held_sector):
     """
-    配当利回り上位5銘柄から未保有セクターの銘柄を選定する。
+    重複銘柄も考慮して、配当利回り上位5銘柄から未保有セクターの銘柄を選定する。
     """
-    df_yield = df_stocks.head(5)
+    df_yield = df_stocks.head(10)
+    df_yield = df_yield.drop_duplicates(subset=["証券コード"], keep="first")
+    df_yield = df_yield.head(5)
     for _, stock in df_yield.iterrows():
         if stock["セクター"] not in held_sector:
             return stock
