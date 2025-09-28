@@ -27,7 +27,7 @@ def pick_stock_by_duplicates(df_stocks, held_sector):
     return None
 
 
-def pick_stock_by_low_market_cap(df_stocks, df_latest_holdings, sector_order):
+def pick_stock_by_low_market_cap(df_stocks, df_latest_holdings):
     """
     時価総額の低いセクターから銘柄を選定する。
     """
@@ -37,24 +37,28 @@ def pick_stock_by_low_market_cap(df_stocks, df_latest_holdings, sector_order):
     df_duplicates = df_stocks[df_stocks["証券コード"].isin(duplicate_codes.index)]
     df_duplicates = df_duplicates.drop_duplicates(subset=["証券コード"], keep="first")
     temp_df = pd.concat([df_yield, df_duplicates], ignore_index=True)
-    temp_df = df_stocks.drop(columns=["URL", "指数"])
-    for sector in sector_order[::-1]:  # 時価総額の低い順にセクターをループ
-        if sector in temp_df["セクター"].values:
-            sector_stocks = temp_df[temp_df["セクター"] == sector]
-            for _, stock in sector_stocks.iterrows():
-                if stock["証券コード"] not in df_latest_holdings["証券コード"].values:
-                    return stock
-
-            # 未保有銘柄がない場合、時価総額の最も低い銘柄を選択
-            matching_rows = df_latest_holdings[
-                df_latest_holdings["証券コード"].isin(sector_stocks["証券コード"])
-            ]
-            if not matching_rows.empty:
-                return matching_rows.sort_values(by="時価総額").iloc[0]
+    temp_df = temp_df.drop(columns=["URL", "指数"])
+    total_cap = df_latest_holdings["時価総額"].sum()
+    print(total_cap)
+    for _, stock in temp_df.iterrows():
+        sector = stock["セクター"]
+        code = stock["証券コード"]
+        print(sector, code)
+        stock_cap = df_latest_holdings[df_latest_holdings["証券コード"] == code][
+            "時価総額"
+        ].sum()
+        print(stock_cap)
+        if stock_cap > total_cap * 0.05:
+            continue
+        sector_stocks = df_latest_holdings[df_latest_holdings["セクター"] == sector]
+        sector_cap = sector_stocks["時価総額"].sum()
+        print(sector_cap)
+        if sector_cap < total_cap * 0.2:
+            return stock
     return None
 
 
-def select_stock(df_stocks, df_latest_holdings, held_sector, sector_order):
+def select_stock(df_stocks, df_latest_holdings, held_sector):
     """
     銘柄選定のメイン処理。
     """
@@ -69,7 +73,7 @@ def select_stock(df_stocks, df_latest_holdings, held_sector, sector_order):
         return stock
 
     # 時価総額の低いセクターから選定
-    stock = pick_stock_by_low_market_cap(df_stocks, df_latest_holdings, sector_order)
+    stock = pick_stock_by_low_market_cap(df_stocks, df_latest_holdings)
     if stock is not None:
         return stock
 
