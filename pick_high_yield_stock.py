@@ -110,7 +110,7 @@ worksheet.update(
 held_sector = df_holding["セクター"].unique()
 
 # 銘柄選定
-picked_stock = select_stock(df_stocks, df_latest_holdings, held_sector, sector_order)
+picked_stock = select_stock(df_stocks, df_latest_holdings, held_sector)
 
 if picked_stock is not None:
     picked_code = picked_stock["証券コード"]
