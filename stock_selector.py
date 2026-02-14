@@ -44,9 +44,9 @@ def pick_stock_in_holding_sector(df_stocks, df_latest_holdings):
     for _, stock in temp_df.iterrows():
         sector = stock["セクター"]
         code = stock["証券コード"]
-        stock_cap = df_latest_holdings[df_latest_holdings["証券コード"] == code][
-            "時価総額"
-        ].sum()
+        stock_cap = df_latest_holdings[
+            df_latest_holdings["証券コード"].astype(str) == str(code)
+        ]["時価総額"].sum()
         if stock_cap > total_cap * 0.05:
             continue
         sector_stocks = df_latest_holdings[df_latest_holdings["セクター"] == sector]

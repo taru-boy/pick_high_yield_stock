@@ -96,7 +96,7 @@ df_stocks = create_latest_dividend_dataframe(
     high_dividend_codes, progressive_codes, consecutive_codes, sector_dict
 )
 
-df_stocks = pd.read_csv("/home/taru-boy/Desktop/get_stock/high_dividend_stocks.csv")
+# df_stocks = pd.read_csv("/home/taru-boy/Desktop/get_stock/high_dividend_stocks.csv")
 df_stocks.sort_values(by="配当利回り(%)", ascending=False, inplace=True)
 
 # 並べ替えたデータを「今週の銘柄」シートに書き込む

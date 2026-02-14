@@ -1,4 +1,6 @@
 import logging
+import os
+import tempfile
 from time import sleep
 
 from selenium import webdriver
@@ -13,8 +15,40 @@ def setup_driver(chromedriver_path="/usr/bin/chromedriver"):
     """Selenium WebDriverをセットアップして返す"""
     options = Options()
     options.add_argument("--headless")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-setuid-sandbox")
+    options.add_argument("--disable-extensions")
+
+    # ロボット検出対策
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
+    # User-Agentを実際のブラウザに偽装
+    options.add_argument(
+        "user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+
+    # 一時ディレクトリをユニークに設定
+    temp_dir = tempfile.mkdtemp(prefix="chrome_")
+    options.add_argument(f"--user-data-dir={temp_dir}")
+
     service = ChromeService(chromedriver_path)
     driver = webdriver.Chrome(service=service, options=options)
+
+    # JavaScriptで navigator.webdriver を削除
+    try:
+        driver.execute_cdp_cmd(
+            "Page.addScriptToEvaluateOnNewDocument",
+            {
+                "source": "Object.defineProperty(navigator, 'webdriver', {get: () => false})"
+            },
+        )
+    except Exception as e:
+        logging.warning(f"Could not set CDP command: {e}")
+
     return driver
 
 
@@ -75,9 +109,10 @@ def get_high_dividend_stock_codes():
             - consecutive_codes (list): 連続増配株の証券コードリスト
             - sector_dict (dict): 証券コードをキー、セクター名を値とする辞書
     """
-    driver = setup_driver()
-
+    driver = None
     try:
+        driver = setup_driver()
+
         # 高配当株のデータを取得
         high_dividend_url = (
             "https://indexes.nikkei.co.jp/nkave/index/component?idx=nk225hdy"
@@ -106,7 +141,21 @@ def get_high_dividend_stock_codes():
         return high_dividend_codes, progressive_codes, consecutive_codes, sector_dict
 
     finally:
-        driver.quit()
+        if driver:
+            try:
+                driver.quit()
+            except Exception as e:
+                logging.error(f"Error closing driver: {e}")
+
+            # 一時ディレクトリをクリーンアップ
+            try:
+                temp_dir = driver.service.path
+                if temp_dir and os.path.exists(temp_dir):
+                    import shutil
+
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception as e:
+                logging.error(f"Error cleaning up temp directory: {e}")
 
 
 # このスクリプトが直接実行された場合のみ動作
