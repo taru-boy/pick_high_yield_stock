@@ -3,11 +3,11 @@ import pandas as pd
 
 def pick_stock_by_yield(df_stocks, held_sector):
     """
-    重複銘柄も考慮して、配当利回り上位5銘柄から未保有セクターの銘柄を選定する。
+    重複銘柄も考慮して、配当利回り上位10銘柄から未保有セクターの銘柄を選定する。
     """
-    df_yield = df_stocks.head(10)
+    df_yield = df_stocks.head(20)
     df_yield = df_yield.drop_duplicates(subset=["証券コード"], keep="first")
-    df_yield = df_yield.head(5)
+    df_yield = df_yield.head(10)
     for _, stock in df_yield.iterrows():
         if stock["セクター"] not in held_sector:
             return stock
@@ -33,13 +33,14 @@ def pick_stock_in_holding_sector(df_stocks, df_latest_holdings):
     """
     対象銘柄の保有比率が高すぎない範囲で高配当銘柄を選定する。
     """
-    df_yield = df_stocks.head(5)
+    df_yield = df_stocks.head(10)
     duplicate_codes = df_stocks["証券コード"].value_counts()
     duplicate_codes = duplicate_codes[duplicate_codes > 1]
     df_duplicates = df_stocks[df_stocks["証券コード"].isin(duplicate_codes.index)]
     df_duplicates = df_duplicates.drop_duplicates(subset=["証券コード"], keep="first")
     temp_df = pd.concat([df_yield, df_duplicates], ignore_index=True)
     temp_df = temp_df.drop(columns=["URL", "指数"])
+    temp_df = temp_df.drop_duplicates(subset=["証券コード"], keep="first")
     total_cap = df_latest_holdings["時価総額"].sum()
     for _, stock in temp_df.iterrows():
         sector = stock["セクター"]
@@ -60,7 +61,7 @@ def select_stock(df_stocks, df_latest_holdings, held_sector):
     """
     銘柄選定のメイン処理。
     """
-    # 配当利回り上位5銘柄から選定
+    # 配当利回り上位10銘柄から選定
     stock = pick_stock_by_yield(df_stocks, held_sector)
     if stock is not None:
         return stock
