@@ -26,12 +26,24 @@ def calculate_dividend_yield(codes, sector_dict):
     base_url = "https://www.nikkei.com/nkd/company/?scode="
     data = []
 
+    session = requests.Session()
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Accept-Language": "ja-JP,ja;q=0.9",
+        "Referer": "https://www.nikkei.com/",
+    }
+
     for code in codes:
         url = base_url + str(code)
-        responce = requests.get(url)
+        responce = session.get(url, headers=headers)
         soup = BeautifulSoup(responce.text, "html.parser")
 
-        company_name = soup.select_one("h1.m-headlineLarge_text").text
+        try:
+            company_name = soup.select_one("h1.m-headlineLarge_text").text
+        except AttributeError:
+            print(f"{code}の会社名の取得に失敗しました。")
+            print(url)
+
         stock_price = soup.select_one("dd.m-stockPriceElm_value").text
         try:
             stock_price = float(
@@ -62,6 +74,7 @@ def calculate_dividend_yield(codes, sector_dict):
                 "URL": url,
             }
         )
+        sleep(1)
 
     df = pd.DataFrame(data)
     df = df.sort_values(by="配当利回り(%)", ascending=False)
