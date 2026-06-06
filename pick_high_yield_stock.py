@@ -87,6 +87,25 @@ if not df_holding.empty:
     # 並べ替えたデータを「時価総額」シートに書き込む
     update_worksheet_with_holdings(gc, spreadsheet_key, df_latest_holdings)
 
+    # 全保有銘柄の総年間配当を計算して「配当推移」シートに追記
+    total_annual_div = round(
+        (
+            df_latest_holdings["合計株数"]
+            * df_latest_holdings["株価"]
+            * df_latest_holdings["配当利回り(%)"]
+            / 100
+        ).sum()
+    )
+    total_market_cap = int(df_latest_holdings["時価総額"].sum())
+    record_date = datetime.today().strftime("%Y-%m-%d")
+    try:
+        ws_trend = gc.open_by_key(spreadsheet_key).worksheet("配当推移")
+    except gspread.exceptions.WorksheetNotFound:
+        sp = gc.open_by_key(spreadsheet_key)
+        ws_trend = sp.add_worksheet(title="配当推移", rows=500, cols=3)
+        ws_trend.append_row(["日付", "総年間配当(円)", "総時価総額(円)"])
+    ws_trend.append_row([record_date, total_annual_div, total_market_cap])
+
 
 # 最新の配当データを取得し、データフレームを作成
 high_dividend_codes, progressive_codes, consecutive_codes, sector_dict = (

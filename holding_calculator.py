@@ -24,7 +24,7 @@ def calculate_latest_holdings(
     df_latest_holdings = calculate_dividend_yield(
         codes=codes, sector_dict=holding_sector_dict
     )
-    df_latest_holdings.drop(columns=["配当利回り(%)", "URL"], inplace=True)
+    df_latest_holdings.drop(columns=["URL"], inplace=True)
 
     # 各銘柄の合計株数を計算
     df_latest_holdings["合計株数"] = 0
