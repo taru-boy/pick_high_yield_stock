@@ -74,7 +74,7 @@ def calculate_dividend_yield(codes, sector_dict):
                 "URL": url,
             }
         )
-        sleep(1)
+        sleep(2)
 
     df = pd.DataFrame(data)
     df = df.sort_values(by="配当利回り(%)", ascending=False)
