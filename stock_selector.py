@@ -33,7 +33,9 @@ def pick_stock_in_holding_sector(df_stocks, df_latest_holdings):
     """
     対象銘柄の保有比率が高すぎない範囲で高配当銘柄を選定する。
     """
-    df_yield = df_stocks.head(10)
+    df_yield = df_stocks.head(20)
+    df_yield = df_yield.drop_duplicates(subset=["証券コード"], keep="first")
+    df_yield = df_yield.head(10)
     duplicate_codes = df_stocks["証券コード"].value_counts()
     duplicate_codes = duplicate_codes[duplicate_codes > 1]
     df_duplicates = df_stocks[df_stocks["証券コード"].isin(duplicate_codes.index)]
