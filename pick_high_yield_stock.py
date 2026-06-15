@@ -15,7 +15,10 @@ from get_high_dividend_stock_code import get_high_dividend_stock_codes
 from holding_calculator import calculate_latest_holdings, get_holding_sector_dict
 
 # 銘柄選定関数をインポート
-from stock_selector import select_stock
+from stock_selector import candidate_codes, select_stock
+
+# 減配フィルタ（EDINET DB）をインポート
+from edinet_dividend import get_dividend_cut_codes
 
 # 最新の配当データフレームを作成する関数をインポート
 from watch_dividend import calculate_dividend_yield, create_latest_dividend_dataframe
@@ -128,8 +131,13 @@ worksheet.update(
 
 held_sector = df_holding["セクター"].unique()
 
+# 候補集合の来期減配予想銘柄を取得（候補集合のみ叩いてレート節約）
+cut_codes = get_dividend_cut_codes(candidate_codes(df_stocks))
+if cut_codes:
+    print(f"減配予想のため除外: {sorted(cut_codes)}")
+
 # 銘柄選定
-picked_stock = select_stock(df_stocks, df_latest_holdings, held_sector)
+picked_stock = select_stock(df_stocks, df_latest_holdings, held_sector, cut_codes)
 
 if picked_stock is not None:
     picked_code = picked_stock["証券コード"]
