@@ -112,3 +112,23 @@ def select_stock(df_stocks, df_latest_holdings, held_sector, cut_codes=frozenset
         return stock
 
     return None
+
+
+def select_stocks(df_stocks, df_latest_holdings, held_sector,
+                  cut_codes=frozenset(), n=2):
+    """
+    select_stock を反復適用して最大 n 銘柄を選定する。
+    各回で選定済みコードを除外集合に、選定済みセクターを保有済みセクターに加え、
+    別セクター優先・コード重複回避を既存ロジックのまま実現する。
+    """
+    picked = []
+    held = set(held_sector)
+    excluded = set(cut_codes)
+    for _ in range(n):
+        stock = select_stock(df_stocks, df_latest_holdings, held, excluded)
+        if stock is None:
+            break
+        picked.append(stock)
+        excluded.add(str(stock["証券コード"]))
+        held.add(stock["セクター"])
+    return picked
