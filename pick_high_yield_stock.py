@@ -15,7 +15,7 @@ from get_high_dividend_stock_code import get_high_dividend_stock_codes
 from holding_calculator import calculate_latest_holdings, get_holding_sector_dict
 
 # 銘柄選定関数をインポート
-from stock_selector import candidate_codes, select_stock
+from stock_selector import candidate_codes, select_stocks
 
 # 減配フィルタ（EDINET DB）をインポート
 from edinet_dividend import get_dividend_cut_codes
@@ -136,29 +136,31 @@ cut_codes = get_dividend_cut_codes(candidate_codes(df_stocks))
 if cut_codes:
     print(f"減配予想のため除外: {sorted(cut_codes)}")
 
-# 銘柄選定
-picked_stock = select_stock(df_stocks, df_latest_holdings, held_sector, cut_codes)
+# 銘柄選定（2銘柄）
+picked_stocks = select_stocks(df_stocks, df_latest_holdings, held_sector, cut_codes, n=2)
 
-if picked_stock is not None:
-    picked_code = picked_stock["証券コード"]
-    picked_name = picked_stock["会社名"]
-    picked_sector = picked_stock["セクター"]
-    picked_price = picked_stock["株価"]
-
-    # 購入履歴に追加
+if picked_stocks:
     today = datetime.today().strftime("%Y-%m-%d")
-    amount = math.ceil(10000 / picked_price)
     worksheet = gc.open_by_key(spreadsheet_key).worksheet("購入履歴")
-    worksheet.append_row(
-        [
-            str(today),
-            int(picked_code),
-            str(picked_name),
-            str(picked_sector),
-            float(picked_price),
-            int(amount),
-        ]
-    )
+    for picked_stock in picked_stocks:
+        picked_code = picked_stock["証券コード"]
+        picked_name = picked_stock["会社名"]
+        picked_sector = picked_stock["セクター"]
+        picked_price = picked_stock["株価"]
+
+        # 購入履歴に追加（1万円以上になるよう株数を切り上げ）
+        amount = math.ceil(10000 / picked_price)
+        worksheet.append_row(
+            [
+                str(today),
+                int(picked_code),
+                str(picked_name),
+                str(picked_sector),
+                float(picked_price),
+                int(amount),
+            ]
+        )
+    print(f"{len(picked_stocks)}銘柄を購入履歴に追記しました。")
 else:
     print("適切な銘柄が見つかりませんでした。")
 
