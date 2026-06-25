@@ -20,6 +20,9 @@ from stock_selector import candidate_codes, select_stocks
 # 減配フィルタ（EDINET DB）をインポート
 from edinet_dividend import get_dividend_cut_codes
 
+# LINE通知関数をインポート
+from line_notify import send_line
+
 # 最新の配当データフレームを作成する関数をインポート
 from watch_dividend import calculate_dividend_yield, create_latest_dividend_dataframe
 
@@ -142,25 +145,43 @@ picked_stocks = select_stocks(df_stocks, df_latest_holdings, held_sector, cut_co
 if picked_stocks:
     today = datetime.today().strftime("%Y-%m-%d")
     worksheet = gc.open_by_key(spreadsheet_key).worksheet("購入履歴")
-    for picked_stock in picked_stocks:
-        picked_code = picked_stock["証券コード"]
+    circled = "①②③④⑤⑥⑦⑧⑨⑩"
+    message_lines = [f"今週の高配当銘柄 ({today})", ""]
+    for i, picked_stock in enumerate(picked_stocks):
+        picked_code = int(picked_stock["証券コード"])
         picked_name = picked_stock["会社名"]
         picked_sector = picked_stock["セクター"]
         picked_price = picked_stock["株価"]
+        picked_yield = picked_stock["配当利回り(%)"]
 
         # 購入履歴に追加（1万円以上になるよう株数を切り上げ）
         amount = math.ceil(10000 / picked_price)
         worksheet.append_row(
             [
                 str(today),
-                int(picked_code),
+                picked_code,
                 str(picked_name),
                 str(picked_sector),
                 float(picked_price),
                 int(amount),
             ]
         )
+
+        # LINE通知用のメッセージを組み立てる
+        mark = circled[i] if i < len(circled) else f"{i + 1}."
+        message_lines.append(f"{mark}{picked_name} ({picked_code})")
+        message_lines.append(
+            f" {picked_sector} / 利回り{picked_yield}% / "
+            f"{picked_price:,.0f}円 / {amount}株"
+        )
+        message_lines.append("")
     print(f"{len(picked_stocks)}銘柄を購入履歴に追記しました。")
+
+    # 選定結果をLINEに通知（失敗してもスクリプトは止めない）
+    if send_line("\n".join(message_lines).strip()):
+        print("LINEに選定結果を通知しました。")
+    else:
+        print("LINE通知に失敗しました。")
 else:
     print("適切な銘柄が見つかりませんでした。")
 
