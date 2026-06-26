@@ -82,13 +82,17 @@ def _latest_dividends(earnings):
 
     判定は必ず `is None`（0.0＝無配予想/無配転落をfalsyで欠損扱いしないため）。
 
+    予想配当性向の算定用に、最新の予想EPS(forecast_eps)も同様に新しい順で拾う
+    （forecast_eps は forecast_dividend_per_share と同じ予想期のレコードに入る）。
+
     Returns:
-        tuple: (actual, forecast, actual_is_adjusted)。
+        tuple: (actual, forecast, actual_is_adjusted, forecast_eps)。
                見つからない側はNone。actual_is_adjustedは調整後実績を採れたか。
     """
     actual = None
     actual_is_adjusted = False
     forecast = None
+    forecast_eps = None
 
     for record in earnings:
         if actual is None:
@@ -104,23 +108,46 @@ def _latest_dividends(earnings):
             f = record.get("forecast_dividend_per_share")
             if f is not None:
                 forecast = f
-        if actual is not None and forecast is not None:
+        if forecast_eps is None:
+            e = record.get("forecast_eps")
+            if e is not None:
+                forecast_eps = e
+        if actual is not None and forecast is not None and forecast_eps is not None:
             break
 
-    return actual, forecast, actual_is_adjusted
+    return actual, forecast, actual_is_adjusted, forecast_eps
+
+
+def _exceeds_full_payout(forecast_dividend, forecast_eps):
+    """
+    予想配当が予想EPSで賄えない（予想配当性向>100%）かを判定する。
+
+    予想EPS未開示(None)は判定不能としてFalse（fail-open）。
+    予想EPS<=0（赤字予想）で配当が正なら、利益で配当を賄えないため100%超とみなす。
+    """
+    if forecast_eps is None:
+        return False
+    if forecast_eps <= 0:
+        return forecast_dividend > 0
+    return forecast_dividend / forecast_eps > 1.0
 
 
 def _is_dividend_cut(edinet_code):
     """
-    決算短信(earnings)から、来期配当予想が直近実績より減配かどうかを判定する。
+    決算短信(earnings)から、来期予想が減配かつ予想配当性向>100%かを判定する。
 
     earnings.dataは新しい順の配列。_latest_dividendsで最新の実績と予想を別々に
     拾い比較する（当期通期予想は直近確定実績の翌期に一致しYoYで整合する）。
     分割調整後の実績を採れた場合はそのまま比較し、生値にフォールバックした場合のみ
     予想が分割後ベースと推定されるか（_looks_like_split）をチェックして誤検知を防ぐ。
 
+    除外は「減配(forecast < actual)」かつ「予想配当性向>100%（下げた後でも利益で
+    配当を賄えない）」の両方を満たす場合のみ。市況ピークからの正常化や下限着地など、
+    減配でも配当が利益でカバーできている銘柄は除外しない。
+
     Returns:
-        bool: 減配ならTrue。判定不能・未開示・分割推定・エラー時はFalse（fail-open）。
+        bool: 減配かつ性向>100%ならTrue。判定不能・未開示・分割推定・エラー時は
+              False（fail-open）。
     """
     try:
         r = requests.get(
@@ -134,12 +161,14 @@ def _is_dividend_cut(edinet_code):
         logging.error(f"EDINET earnings fetch failed for {edinet_code}: {e}")
         return False
 
-    actual, forecast, actual_is_adjusted = _latest_dividends(earnings)
+    actual, forecast, actual_is_adjusted, forecast_eps = _latest_dividends(earnings)
     if actual is None or forecast is None:
         return False
     if not actual_is_adjusted and _looks_like_split(actual, forecast):
         return False
-    return forecast < actual
+    if not forecast < actual:
+        return False
+    return _exceeds_full_payout(forecast, forecast_eps)
 
 
 def get_dividend_cut_codes(codes):
