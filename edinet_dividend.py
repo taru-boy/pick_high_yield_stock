@@ -69,13 +69,55 @@ def _looks_like_split(actual, forecast):
     return any(abs(ratio - r) / r <= _SPLIT_TOLERANCE for r in _SPLIT_RATIOS)
 
 
+def _latest_dividends(earnings):
+    """
+    新しい順のearnings配列から「最新の実績」「最新の予想」を別々に拾う。
+
+    実績と予想は別レコードに散らばっていてよい（本決算は両方持つが、四半期更新は
+    予想のみのことが多く、最新の本決算は配当未パースのこともある）。それぞれ独立に
+    新しい順で最初のnon-null値を採ることで、期中の予想修正を反映しstale化を防ぐ。
+
+    実績は分割調整後(adjusted_annual_dividend_per_share)を優先し、無ければ生値
+    (dividend_per_share)にフォールバックする。
+
+    判定は必ず `is None`（0.0＝無配予想/無配転落をfalsyで欠損扱いしないため）。
+
+    Returns:
+        tuple: (actual, forecast, actual_is_adjusted)。
+               見つからない側はNone。actual_is_adjustedは調整後実績を採れたか。
+    """
+    actual = None
+    actual_is_adjusted = False
+    forecast = None
+
+    for record in earnings:
+        if actual is None:
+            adjusted = record.get("adjusted_annual_dividend_per_share")
+            raw = record.get("dividend_per_share")
+            if adjusted is not None:
+                actual = adjusted
+                actual_is_adjusted = True
+            elif raw is not None:
+                actual = raw
+                actual_is_adjusted = False
+        if forecast is None:
+            f = record.get("forecast_dividend_per_share")
+            if f is not None:
+                forecast = f
+        if actual is not None and forecast is not None:
+            break
+
+    return actual, forecast, actual_is_adjusted
+
+
 def _is_dividend_cut(edinet_code):
     """
     決算短信(earnings)から、来期配当予想が直近実績より減配かどうかを判定する。
 
-    earnings.dataは新しい順の配列。実績(dividend_per_share)と予想
-    (forecast_dividend_per_share)が両方non-nullの最新レコードで比較する。
-    予想が分割後ベースと推定される場合（_looks_like_split）は減配としない。
+    earnings.dataは新しい順の配列。_latest_dividendsで最新の実績と予想を別々に
+    拾い比較する（当期通期予想は直近確定実績の翌期に一致しYoYで整合する）。
+    分割調整後の実績を採れた場合はそのまま比較し、生値にフォールバックした場合のみ
+    予想が分割後ベースと推定されるか（_looks_like_split）をチェックして誤検知を防ぐ。
 
     Returns:
         bool: 減配ならTrue。判定不能・未開示・分割推定・エラー時はFalse（fail-open）。
@@ -92,15 +134,12 @@ def _is_dividend_cut(edinet_code):
         logging.error(f"EDINET earnings fetch failed for {edinet_code}: {e}")
         return False
 
-    for record in earnings:
-        actual = record.get("dividend_per_share")
-        forecast = record.get("forecast_dividend_per_share")
-        if actual is None or forecast is None:
-            continue
-        if _looks_like_split(actual, forecast):
-            return False
-        return forecast < actual
-    return False
+    actual, forecast, actual_is_adjusted = _latest_dividends(earnings)
+    if actual is None or forecast is None:
+        return False
+    if not actual_is_adjusted and _looks_like_split(actual, forecast):
+        return False
+    return forecast < actual
 
 
 def get_dividend_cut_codes(codes):
