@@ -13,6 +13,9 @@ source .venv/bin/activate || { echo "仮想環境有効化失敗" >> /home/taru-
 # Pythonスクリプトを実行
 python pick_high_yield_stock.py >> /home/taru-boy/Desktop/get_stock/cron.log 2>&1 || { echo "スクリプト実行失敗" >> /home/taru-boy/Desktop/get_stock/cron.log; exit 1; }
 
+# 本体実行後、更新済みのスプレッドシートから週次運用レポートを生成（失敗しても止めない）
+python note_report.py >> /home/taru-boy/Desktop/get_stock/cron.log 2>&1 || echo "レポート生成失敗" >> /home/taru-boy/Desktop/get_stock/cron.log
+
 # 仮想環境を無効化
 deactivate
 
