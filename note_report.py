@@ -48,6 +48,13 @@ if JP_FONT:
 OUTPUT_DIR = "/home/taru-boy/Desktop/journaling/high_dividend_stock_report"
 REPORT_FILENAME = "週次運用レポート.md"
 
+# 旗艦の有料記事（「分析しない」高配当株投資の仕組み）への導線。
+# レポート末尾に毎週このCTAを自動で載せ、無料の集客導線→有料記事 の funnel を
+# 手作業（旧 docs/weekly-report.md 手順6）に頼らず必ず通す。
+# ★ここに旗艦記事の note URL を入れる。空のままなら CTA は出力しない（fail-safe：
+#   壊れた/プレースホルダのリンクを公開しないため）。
+FLAGSHIP_ARTICLE_URL = "https://note.com/tarutaru_bouzu/n/n22a7f1da8e1c"
+
 # 環境変数を読み込む（pick_high_yield_stock.py と同じ認証パターンを流用）
 load_dotenv(dotenv_path="/home/taru-boy/Desktop/get_stock/.env")
 SPREADSHEET_KEY = os.getenv("SPREADSHEET_KEY")
@@ -121,11 +128,36 @@ def _signed_pct(value):
     return f"{sign}{abs(value):.2f}%"
 
 
-def build_trend_graphs(df_trend):
+def _cumulative_cost_series(df_holding, dates):
+    """各トレンド日における累積取得額 Σ(取得単価×株数) を dates と同じ並びで返す。
+
+    配当推移タブは取得額を持たない（日付/年間配当/時価総額の3列）ため、購入履歴
+    （日付・取得単価・株数）から日付 ≤ d の購入を積み上げて再構成する。
+    必要列が無い・全て解析不能なら None（取得額ラインは描かない）。
+    """
+    if df_holding is None or df_holding.empty or "日付" not in df_holding:
+        return None
+    price_col = "取得単価" if "取得単価" in df_holding else "株価"
+    if price_col not in df_holding or "株数" not in df_holding:
+        return None
+    h = pd.DataFrame(
+        {
+            "日付": pd.to_datetime(df_holding["日付"], errors="coerce"),
+            "_cost": df_holding[price_col].map(_to_number)
+            * df_holding["株数"].map(_to_number),
+        }
+    ).dropna(subset=["日付", "_cost"])
+    if h.empty:
+        return None
+    return [h.loc[h["日付"] <= d, "_cost"].sum() for d in dates]
+
+
+def build_trend_graphs(df_trend, df_holding=None):
     """配当推移タブからトレンドグラフのPNGを生成し、(表示名, ファイル名) のリストを返す。
 
     日本語フォントが見つかればラベルも日本語にする。見つからない環境では
     豆腐化を避けるため英語ラベルにフォールバックする（JP_FONT で判定）。
+    総時価総額グラフには購入履歴から再構成した取得額ラインを重ね、評価損益を可視化する。
     """
     df = _clean_trend(df_trend)
     if df is None:
@@ -150,17 +182,44 @@ def build_trend_graphs(df_trend):
     # (データ列, 日本語タイトル, 英語タイトル, ファイル名スラッグ)
     specs = [
         ("総年間配当(円)", "予想年間配当額（円）", "Forecast Annual Dividend (JPY)", "trend_annual_dividend"),
-        ("総時価総額(円)", "総時価総額（円）", "Total Market Value (JPY)", "trend_market_value"),
+        ("総時価総額(円)", "総時価総額と取得額（円）", "Market Value vs. Cost (JPY)", "trend_market_value"),
         ("累積見込み配当(円)", "累積見込み配当（円・概算）", "Cumulative Dividend, est. (JPY)", "trend_cumulative_dividend"),
     ]
+    # 総時価総額グラフに重ねる取得額（購入履歴から再構成）。
+    cost_series = _cumulative_cost_series(df_holding, df["日付"])
+
     filenames = []
     for column, jp_title, en_title, slug in specs:
         title = jp_title if JP_FONT else en_title
         if df[column].dropna().empty:
             continue
+        overlay_cost = slug == "trend_market_value" and cost_series is not None
         fig, ax = plt.subplots(figsize=(8, 4))
         ax.plot(df["日付"], df[column], marker="o", linewidth=2, color="#2a7ae2")
-        ax.fill_between(df["日付"], df[column], alpha=0.12, color="#2a7ae2")
+        # 取得額を重ねる総時価総額グラフでは、青い全面塗りの代わりに損益バンドを使う。
+        if not overlay_cost:
+            ax.fill_between(df["日付"], df[column], alpha=0.12, color="#2a7ae2")
+        # 総時価総額グラフには取得額ラインを重ね、面（評価損益）を塗り分ける。
+        if overlay_cost:
+            value_label = "総時価総額" if JP_FONT else "Market value"
+            cost_label = "取得額" if JP_FONT else "Cost"
+            ax.lines[-1].set_label(value_label)
+            ax.plot(
+                df["日付"], cost_series,
+                marker="o", linewidth=2, linestyle="--", color="#888888",
+                label=cost_label,
+            )
+            ax.fill_between(
+                df["日付"], cost_series, df[column],
+                where=[v >= c for v, c in zip(df[column], cost_series)],
+                alpha=0.18, color="#37b24d", interpolate=True,
+            )
+            ax.fill_between(
+                df["日付"], cost_series, df[column],
+                where=[v < c for v, c in zip(df[column], cost_series)],
+                alpha=0.18, color="#f03e3e", interpolate=True,
+            )
+            ax.legend(loc="upper left", fontsize=9)
         ax.set_title(title)
         ax.grid(True, alpha=0.3)
         ax.get_yaxis().set_major_formatter(
@@ -175,9 +234,117 @@ def build_trend_graphs(df_trend):
     return filenames
 
 
-def build_markdown(df_holding, df_market, df_trend, graph_files, date_str):
-    """各データフレームからレポートMarkdownの文字列を組み立てる。"""
+def _collapse_by_share(series, min_share=0.02):
+    """評価額降順に並べ、構成比 min_share 未満の項目だけを「その他」に畳む。
+
+    構成比 min_share（既定 2%）以上の項目は必ず単独スライスとして残す
+    （「分散している」を細かく見せたいので件数では畳まない）。全項目が閾値以上なら
+    「その他」スライスは作らない。
+    """
+    series = series.sort_values(ascending=False)
+    total = series.sum()
+    if total <= 0:
+        return series
+    keep = series[series / total >= min_share]
+    rest = series[series / total < min_share]
+    if not rest.empty:
+        keep = keep.copy()
+        keep["その他"] = rest.sum()
+    return keep
+
+
+def build_composition_graphs(df_market):
+    """時価総額タブからポートフォリオ構成の円グラフ（PNG）を生成する。
+
+    セクター別・銘柄別の2枚。19行/32行の表の代わりに「分散している」ことを
+    一目で見せる集客向けビジュアル。構成比2%未満だけを「その他」に畳み、2%以上は単独表示。
+    日本語フォントが無ければラベルを伏せて豆腐化を避ける（autopct の％は出す）。
+    戻り値は build_trend_graphs と同じ (表示名, ファイル名) のリスト。
+    """
+    if df_market is None or "時価総額" not in df_market:
+        return []
+    dfm = df_market.copy()
+    dfm["_cap"] = dfm["時価総額"].map(_to_number)
+    dfm = dfm.dropna(subset=["_cap"])
+    dfm = dfm[dfm["_cap"] > 0]
+    if dfm.empty:
+        return []
+
+    def _draw_pie(series, jp_title, en_title, slug):
+        title = jp_title if JP_FONT else en_title
+        labels = list(series.index)
+        # スライスが多い（2%閾値で銘柄数が増える）と外周ラベルが重なって潰れるので、
+        # 一定数を超えたら社名は凡例に逃がし、スライスには％だけ載せる。
+        use_legend = not JP_FONT or len(series) > 12
+        if use_legend:
+            fig, ax = plt.subplots(figsize=(9, 6))
+        else:
+            fig, ax = plt.subplots(figsize=(6, 6))
+        wedges, *_ = ax.pie(
+            list(series.values),
+            labels=None if use_legend else labels,
+            autopct="%1.1f%%",
+            startangle=90,
+            counterclock=False,
+            pctdistance=0.8,
+            textprops={"fontsize": 9},
+        )
+        if use_legend and JP_FONT:
+            ax.legend(
+                wedges,
+                [f"{n}（{v / series.sum() * 100:.1f}%）" for n, v in series.items()],
+                loc="center left",
+                bbox_to_anchor=(1.0, 0.5),
+                fontsize=8,
+                frameon=False,
+            )
+        ax.set_title(title)
+        ax.axis("equal")
+        fig.tight_layout()
+        filename = f"{slug}.png"  # 固定名で毎週上書き
+        fig.savefig(os.path.join(OUTPUT_DIR, filename), dpi=120)
+        plt.close(fig)
+        return title, filename
+
+    results = []
+    if "セクター" in dfm:
+        sector_cap = dfm.groupby("セクター")["_cap"].sum()
+        if not sector_cap.empty:
+            sector_cap = _collapse_by_share(sector_cap)
+            results.append(
+                _draw_pie(sector_cap, "セクター別構成", "Sector Allocation", "pie_sector")
+            )
+    if "会社名" in dfm:
+        holding_cap = dfm.groupby("会社名")["_cap"].sum()
+        if not holding_cap.empty:
+            holding_cap = _collapse_by_share(holding_cap)
+            results.append(
+                _draw_pie(
+                    holding_cap,
+                    "銘柄別構成",
+                    "Holdings",
+                    "pie_holding",
+                )
+            )
+    return results
+
+
+def build_markdown(df_holding, df_market, df_trend, graph_files, pie_files, date_str):
+    """各データフレームからレポートMarkdownの文字列を組み立てる。
+
+    graph_files はトレンド折れ線（build_trend_graphs）、pie_files は構成円グラフ
+    （build_composition_graphs）の (表示名, ファイル名) リスト。
+    """
     lines = [f"# 週次 高配当株レポート（{date_str}）", ""]
+
+    # --- 今週の一言所感（自動下書きのプレースホルダ）---------------------
+    # weekly_report_note.sh から呼ぶ headless Claude が <!-- AUTO_SHOKAN --> 行を
+    # たる坊の声の所感1〜2文に置換する。Claude が失敗してもこの枠が残るだけで、
+    # たる坊が手で書ける（fail-open）。公開時は見出しの「（…）」を外す。
+    lines.append("## 今週の一言所感（自動下書き・公開前に確認）")
+    lines.append("")
+    lines.append("<!-- AUTO_SHOKAN -->")
+    lines.append("")
 
     # --- 今週の買付 -------------------------------------------------------
     lines.append("## 今週の買付")
@@ -196,24 +363,27 @@ def build_markdown(df_holding, df_market, df_trend, graph_files, date_str):
                 yield_map[str(r["証券コード"]).strip()] = _to_number(
                     r.get("配当利回り(%)")
                 )
-        circled = "①②③④⑤⑥⑦⑧⑨⑩"
+        # 番号付きリスト（1. ）で出力する。note のエディタが入力ルールで番号リスト化し、
+        # 番号は自動採番される。社名（コード）の後で改行し、詳細は項目内2行目に置く
+        # （継続行 → post_to_note.py 側でソフト改行として送られる）。
         for i, (_, r) in enumerate(bought.iterrows()):
             code = str(r.get("証券コード", "")).strip()
             name = r.get("会社名", "")
             sector = r.get("セクター", "")
             price = _to_number(r.get("取得単価")) or _to_number(r.get("株価"))
             shares = _to_number(r.get("株数"))
-            mark = circled[i] if i < len(circled) else f"{i + 1}."
             y = yield_map.get(code)
             yield_text = f"利回り{y:.2f}% / " if y is not None else ""
             price_text = f"{price:,.0f}円" if price is not None else "—"
             shares_text = f"{int(shares)}株" if shares is not None else "—株"
-            lines.append(f"- {mark}**{name}**（{code}）")
-            lines.append(f"  {sector} / {yield_text}{price_text} / {shares_text}")
+            lines.append(f"{i + 1}. **{name}**（{code}）")
+            lines.append(f"   {sector} / {yield_text}{price_text} / {shares_text}")
     lines.append("")
 
-    # --- ポートフォリオ全体 ----------------------------------------------
-    lines.append("## ポートフォリオ全体")
+    # --- ポートフォリオの育ち具合 ----------------------------------------
+    # 「集客に効く数字」だけに絞る：予想年間配当の伸び・利回り・評価額（原価/損益は
+    # 括弧でまとめて1行に畳む）。全保有一覧・全セクター表は後段の円グラフに任せる。
+    lines.append("## ポートフォリオの育ち具合")
     lines.append("")
     # 取得原価 = Σ(取得単価 × 株数)。列名は 取得単価 を優先し、無ければ 株価。
     total_cost = None
@@ -244,14 +414,7 @@ def build_markdown(df_holding, df_market, df_trend, graph_files, date_str):
     if total_value is None:
         total_value = trend_value
 
-    if total_cost is not None:
-        lines.append(f"- 取得原価: {_yen(total_cost)}")
-    if total_value is not None:
-        lines.append(f"- 現在評価額: {_yen(total_value)}")
-    if total_cost is not None and total_value is not None and total_cost > 0:
-        pnl = total_value - total_cost
-        pnl_pct = pnl / total_cost * 100
-        lines.append(f"- **評価損益: {_signed_yen(pnl)}（{_signed_pct(pnl_pct)}）**")
+    # 予想年間配当（前回比）を先頭に——「育っていく」のが主役のフック。
     if annual_div is not None:
         delta = ""
         if prev_annual_div is not None:
@@ -260,6 +423,17 @@ def build_markdown(df_holding, df_market, df_trend, graph_files, date_str):
     if annual_div is not None and total_value and total_value > 0:
         port_yield = annual_div / total_value * 100
         lines.append(f"- 平均利回り（予想年間配当 ÷ 評価額）: {port_yield:.2f}%")
+    # 評価額の行に取得原価・評価損益を括弧でまとめて畳む（行数を減らす）。
+    if total_value is not None:
+        extra = ""
+        if total_cost is not None and total_cost > 0:
+            pnl = total_value - total_cost
+            pnl_pct = pnl / total_cost * 100
+            extra = (
+                f"（取得原価 {_yen(total_cost)}"
+                f" / 評価損益 {_signed_yen(pnl)}・{_signed_pct(pnl_pct)}）"
+            )
+        lines.append(f"- 評価額: {_yen(total_value)}{extra}")
     lines.append("")
 
     # --- トレンドグラフ ---------------------------------------------------
@@ -272,35 +446,33 @@ def build_markdown(df_holding, df_market, df_trend, graph_files, date_str):
             lines.append(f"![{title}]({filename})")
             lines.append("")
 
-    # --- セクター別構成 ---------------------------------------------------
-    if df_market is not None and "セクター" in df_market and "時価総額" in df_market:
-        dfm = df_market.copy()
-        dfm["_cap"] = dfm["時価総額"].map(_to_number)
-        dfm = dfm.dropna(subset=["_cap"])
-        sector_cap = dfm.groupby("セクター")["_cap"].sum().sort_values(ascending=False)
-        grand_total = sector_cap.sum()
-        if grand_total > 0:
-            lines.append("## セクター別構成")
-            lines.append("")
-            lines.append("| セクター | 評価額 | 構成比 |")
-            lines.append("|---|--:|--:|")
-            for sector, cap in sector_cap.items():
-                lines.append(f"| {sector} | {_yen(cap)} | {cap / grand_total * 100:.1f}% |")
+    # --- ポートフォリオの構成（円グラフ）---------------------------------
+    # セクター別・銘柄別の構成は表ではなく円グラフで見せる（build_composition_graphs）。
+    # 「ちゃんと分散している」が一目で伝わり、19行/32行の表よりノイズが少なく集客に効く。
+    if pie_files:
+        lines.append("## ポートフォリオの構成")
+        lines.append("")
+        for title, filename in pie_files:
+            lines.append(f"![{title}]({filename})")
             lines.append("")
 
-        # --- 保有銘柄一覧（評価額降順）-----------------------------------
-        if "会社名" in dfm:
-            dfm_sorted = dfm.sort_values("_cap", ascending=False)
-            lines.append("## 保有銘柄一覧")
-            lines.append("")
-            lines.append("| 銘柄 | セクター | 評価額 |")
-            lines.append("|---|---|--:|")
-            for _, r in dfm_sorted.iterrows():
-                lines.append(
-                    f"| {r.get('会社名', '')}（{str(r.get('証券コード', '')).strip()}） "
-                    f"| {r.get('セクター', '')} | {_yen(r['_cap'])} |"
-                )
-            lines.append("")
+    # --- 有料記事への導線（CTA）------------------------------------------
+    # 旗艦記事への入口を毎週固定で載せる（funnel。docs/weekly-report.md 参照）。
+    # 固定文＝毎週同じなので所感の Claude パスは通さない。盛らず・売り込まず、
+    # 説得は旗艦記事の無料パートに任せる。リンクは素のURLを単独行に置く
+    # （note は自動リンク／カード化しやすく、GitHub/LINE プレビューでも崩れない）。
+    # FLAGSHIP_ARTICLE_URL が空なら丸ごと出さない（壊れたリンクを公開しない）。
+    if FLAGSHIP_ARTICLE_URL:
+        lines.append("## レポートの裏側")
+        lines.append("")
+        lines.append(
+            "このレポートを毎週動かしている「銘柄の選び方」そのものは、別の記事に"
+            "全部書いています。罠銘柄の避け方や、分散のかけ方の考え方まで。"
+            "よければどうぞ。"
+        )
+        lines.append("")
+        lines.append(FLAGSHIP_ARTICLE_URL)
+        lines.append("")
 
     # --- フッター ---------------------------------------------------------
     lines.append("---")
@@ -334,8 +506,11 @@ def main():
     date_str = datetime.today().strftime("%Y-%m-%d")
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    graph_files = build_trend_graphs(df_trend)
-    markdown = build_markdown(df_holding, df_market, df_trend, graph_files, date_str)
+    graph_files = build_trend_graphs(df_trend, df_holding)
+    pie_files = build_composition_graphs(df_market)
+    markdown = build_markdown(
+        df_holding, df_market, df_trend, graph_files, pie_files, date_str
+    )
 
     output_path = os.path.join(OUTPUT_DIR, REPORT_FILENAME)
     with open(output_path, "w", encoding="utf-8") as f:
@@ -343,7 +518,7 @@ def main():
 
     print(markdown)
     print(f"\n[ok] レポートを書き出しました: {output_path}")
-    for _, filename in graph_files:
+    for _, filename in graph_files + pie_files:
         print(f"[ok] グラフ: {os.path.join(OUTPUT_DIR, filename)}")
 
 
