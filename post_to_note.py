@@ -1,6 +1,6 @@
 """週次運用レポートを note の「下書き」に流し込むスクリプト（自動公開はしない）。
 
-high_dividend_stock_report/週次運用レポート.md（所感入りの完成版）を読み、
+note/reports/週次運用レポート.md（所感入りの完成版）を読み、
 note の新規投稿エディタに タイトル・本文・画像5枚 を入れ、マガジンを指定して
 **下書き保存**するところまでを Selenium で自動化する。公開ボタンは押さない。
 公開はたる坊が note 上で所感を確認・手直ししてから手で行う（品質ゲート）。
@@ -46,7 +46,7 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
 # --- 設定 -----------------------------------------------------------------
-REPORT_DIR = "/home/taru-boy/Desktop/journaling/high_dividend_stock_report"
+REPORT_DIR = "/home/taru-boy/Desktop/journaling/note/reports"
 REPORT_MD = os.path.join(REPORT_DIR, "週次運用レポート.md")
 PROFILE_DIR = os.path.expanduser("~/.note_profile")  # ログイン維持用の永続プロファイル
 CHROMEDRIVER_PATH = "/usr/bin/chromedriver"  # 既存スクリプトと同じ

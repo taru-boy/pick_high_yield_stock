@@ -43,9 +43,9 @@ if JP_FONT:
     plt.rcParams["axes.unicode_minus"] = False  # マイナス記号の豆腐化を防ぐ
 
 # レポート（Markdown / グラフPNG）の出力先。
-# 手書きのnote下書き（drafts/）とは性格が違う機械生成物なので専用フォルダに分ける。
+# 手書きのnote下書き（note/drafts/）とは性格が違う機械生成物なので専用フォルダに分ける。
 # ファイル名は固定で毎週上書きする（最新版が1セットだけ残る運用。公開済みのアーカイブはnote側が持つ）。
-OUTPUT_DIR = "/home/taru-boy/Desktop/journaling/high_dividend_stock_report"
+OUTPUT_DIR = "/home/taru-boy/Desktop/journaling/note/reports"
 REPORT_FILENAME = "週次運用レポート.md"
 
 # 旗艦の有料記事（「分析しない」高配当株投資の仕組み）への導線。
