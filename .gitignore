@@ -3,6 +3,8 @@
 *.log
 *.ipynb
 *.csv
+# 除外リストは出力データではなく設定なので追跡する
+!excluded_stocks.csv
 *.json
 __pycache__
 test.py

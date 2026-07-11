@@ -20,6 +20,9 @@ from stock_selector import candidate_codes, select_stocks
 # 減配フィルタ（EDINET DB）をインポート
 from edinet_dividend import get_dividend_cut_codes
 
+# 買付不可銘柄の除外リストをインポート
+from excluded_stocks import load_excluded_codes
+
 # LINE通知関数をインポート
 from line_notify import send_line
 
@@ -134,10 +137,19 @@ worksheet.update(
 
 held_sector = df_holding["セクター"].unique()
 
+# 買付不可銘柄は候補から先に落とす（EDINETの無料枠を消費しない）
+excluded_codes = load_excluded_codes()
+all_codes = candidate_codes(df_stocks)
+codes = [c for c in all_codes if str(c) not in excluded_codes]
+hit_excluded = sorted(excluded_codes & set(str(c) for c in all_codes))
+if hit_excluded:
+    print(f"買付不可のため除外: {hit_excluded}")
+
 # 候補集合の来期減配予想銘柄を取得（候補集合のみ叩いてレート節約）
-cut_codes = get_dividend_cut_codes(candidate_codes(df_stocks))
-if cut_codes:
-    print(f"減配予想のため除外: {sorted(cut_codes)}")
+dividend_cut_codes = get_dividend_cut_codes(codes)
+if dividend_cut_codes:
+    print(f"減配予想のため除外: {sorted(dividend_cut_codes)}")
+cut_codes = dividend_cut_codes | excluded_codes
 
 # 銘柄選定（2銘柄）
 picked_stocks = select_stocks(df_stocks, df_latest_holdings, held_sector, cut_codes, n=2)
