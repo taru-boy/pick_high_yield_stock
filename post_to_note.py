@@ -25,8 +25,9 @@ cron では run_pick_high_yield_stock.sh から weekly_report_note.sh の後に�
   python post_to_note.py            # 下書き保存（headful）
 
   # セレクタ調査用の診断モード：
-  python post_to_note.py --dump          # 実DOMを note_dom_dump.html / note_dump.png に
-  python post_to_note.py --probe-image   # 画像挿入の仕組みを確認
+  python post_to_note.py --dump             # 実DOMを note_dom_dump.html / note_dump.png に
+  python post_to_note.py --probe-image      # 本文画像挿入の仕組みを確認
+  python post_to_note.py --probe-eyecatch   # 見出し画像（サムネイル）設定の仕組みを確認
 ────────────────────────────────────────────────────────────────────────
 """
 
@@ -55,6 +56,7 @@ NOTE_TOP_URL = "https://note.com/"
 NOTE_NEW_URL = "https://note.com/notes/new"  # 新規投稿エディタ
 ERROR_SHOT = os.path.join(REPORT_DIR, "note_post_error.png")  # 失敗時のスクショ
 SEND_LINE = "/home/taru-boy/Desktop/journaling/scripts/send_line.sh"
+THUMBNAIL_IMAGE = os.path.join(REPORT_DIR, "thumbnail.png")  # note 見出し画像（サムネイル。固定）
 
 # note のエディタ DOM セレクタ。2026-06 時点の editor.note.com の実DOMで確認済み。
 # note の UI 変更でここが最初に壊れる。崩れたら `--dump` で実DOMを取り直して合わせる。
@@ -73,6 +75,17 @@ NOTE_SELECTORS = {
     "save_draft": (By.XPATH, "//button[normalize-space()='下書き保存']"),
     # 「公開に進む」ボタン（★絶対に押さない。誤クリック回避の参照用）
     "to_publish": (By.XPATH, "//button[normalize-space()='公開に進む']"),
+    # 見出し画像（サムネイル）追加ボタン。2026-08-22 に note 側の DOM が変わり、
+    # aria-label が button から中の svg に移った（button[aria-label=...] は空振りする）。
+    # ancestor-or-self で拾えば新旧どちらの DOM でも当たる（実DOMで確認済み）。
+    "eyecatch_add": (By.XPATH, "//*[@aria-label='画像を追加']/ancestor-or-self::button[1]"),
+    # 「画像を追加」クリックで出るメニューの「画像をアップロード」項目
+    # （テキストが「画像をアップロード推奨サイズ：1280×670px」と連結して出るため前方一致）
+    "eyecatch_menu_upload": (By.XPATH, "//button[starts-with(normalize-space(.), '画像をアップロード')]"),
+    # 見出し画像専用の file input（本文用の #note-editor-image-upload-input とは別）
+    "eyecatch_input": (By.ID, "note-editor-eyecatch-input"),
+    # 位置調整（トリミング）モーダル内の「保存」（下書き保存ボタンとはテキストが異なり衝突しない）
+    "eyecatch_crop_save": (By.XPATH, "//div[@role='dialog']//button[normalize-space()='保存']"),
 }
 
 WAIT = 40  # 要素待ちの最大秒（エディタ SPA の描画が遅い）
@@ -274,6 +287,105 @@ def cmd_dump(headless=True):
 
 
 
+EYECATCH_DUMP_HTML_1 = os.path.join(REPORT_DIR, "note_eyecatch_dump_1.html")
+EYECATCH_DUMP_PNG_1 = os.path.join(REPORT_DIR, "note_eyecatch_dump_1.png")
+EYECATCH_DUMP_HTML_2 = os.path.join(REPORT_DIR, "note_eyecatch_dump_2.html")
+EYECATCH_DUMP_PNG_2 = os.path.join(REPORT_DIR, "note_eyecatch_dump_2.png")
+EYECATCH_DUMP_HTML_3 = os.path.join(REPORT_DIR, "note_eyecatch_dump_3.html")
+EYECATCH_DUMP_PNG_3 = os.path.join(REPORT_DIR, "note_eyecatch_dump_3.png")
+
+
+def _dump_dom(driver, html_path, png_path, sel, label):
+    script = r"""
+    const sel = arguments[0];
+    const seen = new Set();
+    const out = [];
+    document.querySelectorAll(sel).forEach(el => {
+      let html = el.outerHTML;
+      const open = html.split('>')[0] + '>';
+      const text = (el.textContent || '').trim().slice(0, 40);
+      const key = open + '|' + text;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(open + (text ? '  «' + text + '»' : ''));
+    });
+    return out.join('\n');
+    """
+    dom = driver.execute_script(script, sel)
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(f"<!-- {label} / URL: {driver.current_url} -->\n")
+        f.write(dom or "(要素が取れませんでした)")
+    driver.save_screenshot(png_path)
+    log(f"ダンプ（{label}）: {html_path} / {png_path}")
+
+
+def cmd_probe_eyecatch(headless=False):
+    """見出し画像（サムネイル）アップロードの仕組みを調べる診断モード。
+
+    人手での観察は挟まず、実際に THUMBNAIL_IMAGE を file input まで送って
+    2段階（クリック直後 / 画像送信後の位置調整パネル）の実DOMとスクショを
+    保存して終了する。**保存系ボタンは一切クリックしない**（下書きも公開もしない、
+    観察専用）。screenshot は後で Read ツールで目視確認できる。
+    """
+    if not os.path.isdir(PROFILE_DIR):
+        log("ログイン用プロファイルがありません。先に `python post_to_note.py --login` を実行してください。")
+        return 1
+    sel = "input[type='file'], button, [role='menu'] *, [role='dialog'] *, [class*='crop' i], [class*='Crop' i]"
+    driver = setup_driver(headless=headless)
+    try:
+        driver.get(NOTE_NEW_URL)
+        if not wait_for_editor(driver):
+            log("エディタが出ませんでした")
+            return 1
+
+        # 見出し画像の「画像を追加」ボタンを探して押す
+        add_btn = driver.find_elements(By.CSS_SELECTOR, "button[aria-label='画像を追加']")
+        log(f"「画像を追加」ボタン数: {len(add_btn)}")
+        if not add_btn:
+            log("「画像を追加」ボタンが見つかりませんでした")
+            return 1
+        driver.execute_script("arguments[0].click();", add_btn[-1])
+        time.sleep(2)
+        _dump_dom(driver, EYECATCH_DUMP_HTML_1, EYECATCH_DUMP_PNG_1, sel, "click直後")
+
+        # メニューの「画像をアップロード」を押す（テキスト先頭一致。推奨サイズ文言が同居するため）
+        upload_opt = driver.find_elements(
+            By.XPATH, "//button[starts-with(normalize-space(.), '画像をアップロード')]"
+        )
+        log(f"「画像をアップロード」項目数: {len(upload_opt)}")
+        if upload_opt:
+            driver.execute_script("arguments[0].click();", upload_opt[-1])
+            time.sleep(2)
+
+        inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+        log(f"「画像をアップロード」押下後 file input 数: {len(inputs)}")
+        if not inputs:
+            log("file input が見つかりませんでした（dump1 を確認してください）")
+            return 0
+        for i, el in enumerate(inputs):
+            html = driver.execute_script("return arguments[0].outerHTML;", el)
+            log(f"  input[{i}]: {html[:300]}")
+        log(f"画像送信開始: {THUMBNAIL_IMAGE}")
+        inputs[-1].send_keys(THUMBNAIL_IMAGE)
+        log("画像送信 send_keys 呼び出し完了（ここまで到達）")
+        time.sleep(3)
+        _dump_dom(driver, EYECATCH_DUMP_HTML_2, EYECATCH_DUMP_PNG_2, sel, "画像送信後（位置調整パネル想定）")
+
+        # 位置調整パネルの「保存」（トリミングモーダル内。下書き保存とは別ボタン）を押して
+        # 見出し画像が実際に反映されるところまで確認する（note の下書き保存は押さない＝
+        # このドラフト自体は保存されない想定）。
+        crop_save = driver.find_elements(By.XPATH, "//div[@role='dialog']//button[normalize-space()='保存']")
+        log(f"位置調整パネルの「保存」ボタン数: {len(crop_save)}")
+        if crop_save:
+            driver.execute_script("arguments[0].click();", crop_save[-1])
+            time.sleep(10)  # 反映（サーバ処理）待ち。probe では余裕を見て長めに待つ
+            _dump_dom(driver, EYECATCH_DUMP_HTML_3, EYECATCH_DUMP_PNG_3, sel, "見出し画像 保存後")
+        log("観察用ダンプ完了。note の下書き保存は押していません。")
+        return 0
+    finally:
+        driver.quit()
+
+
 def _is_logged_in(driver):
     """ログイン済みかの簡易判定（ログインボタンが見えなければログイン済みとみなす）。"""
     driver.get(NOTE_TOP_URL)
@@ -413,6 +525,65 @@ def insert_images_at_cursor(driver, paths):
     return inserted
 
 
+def set_eyecatch(driver, path):
+    """見出し画像（サムネイル）を設定する。成功したら True。
+
+    手順（実DOMで確認・--probe-eyecatch）：「画像を追加」→ メニュー「画像をアップロード」
+    → file input (#note-editor-eyecatch-input) に1枚送信 → 位置調整（トリミング）モーダルの
+    「保存」を押す。モーダルが閉じれば反映完了とみなす。
+    見出し画像はあくまで付加価値（fail-open）: 途中で要素が見つからない・タイムアウトしても
+    例外を投げず False を返すだけにし、呼び出し側（cmd_post）は下書き保存を続行する。
+    """
+    if not os.path.exists(path):
+        log(f"見出し画像が見つかりません（スキップ）: {path}")
+        return False
+    try:
+        add_btn = driver.find_elements(*NOTE_SELECTORS["eyecatch_add"])
+        if not add_btn:
+            log("  見出し画像「画像を追加」ボタンが見つからず（スキップ）")
+            return False
+        driver.execute_script("arguments[0].click();", add_btn[-1])
+        time.sleep(1.5)
+
+        upload_opt = driver.find_elements(*NOTE_SELECTORS["eyecatch_menu_upload"])
+        if not upload_opt:
+            log("  見出し画像メニュー「画像をアップロード」が見つからず（スキップ）")
+            return False
+        driver.execute_script("arguments[0].click();", upload_opt[-1])
+        time.sleep(1.5)
+
+        inputs = driver.find_elements(*NOTE_SELECTORS["eyecatch_input"])
+        if not inputs:
+            log("  見出し画像の file input が見つからず（スキップ）")
+            return False
+        inputs[-1].send_keys(path)
+
+        # 位置調整（トリミング）モーダルが現れるのを待つ
+        deadline = time.time() + 20
+        crop_save = []
+        while time.time() < deadline:
+            crop_save = driver.find_elements(*NOTE_SELECTORS["eyecatch_crop_save"])
+            if crop_save:
+                break
+            time.sleep(1)
+        if not crop_save:
+            log("  位置調整パネルの「保存」ボタンが現れず（スキップ）")
+            return False
+        driver.execute_script("arguments[0].click();", crop_save[-1])
+
+        # モーダルが閉じれば反映完了とみなす
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if not driver.find_elements(By.CSS_SELECTOR, "div[role='dialog']"):
+                return True
+            time.sleep(1)
+        log("  見出し画像の反映確認がタイムアウト（保存自体は押下済み）")
+        return True
+    except Exception as e:  # noqa: BLE001
+        log(f"  見出し画像の設定に失敗（スキップ）: {e}")
+        return False
+
+
 def cmd_post(headless=False):
     """新規エディタに流し込んで下書き保存する。公開ボタンは押さない。"""
     if not os.path.exists(REPORT_MD):
@@ -448,6 +619,13 @@ def cmd_post(headless=False):
         title_el.click()
         title_el.send_keys(title)
         log("タイトル入力 完了")
+
+        # 見出し画像（サムネイル）。本文入力より前に置く（本文入力後に開くとカーソル状態が
+        # 乱れるのを避けるため）。付加価値なので失敗しても下書き保存自体は続行する（fail-open）。
+        if set_eyecatch(driver, THUMBNAIL_IMAGE):
+            log("見出し画像（サムネイル）設定 完了")
+        else:
+            log("見出し画像の設定はスキップされました（下書きは継続）")
 
         # 本文をブロック順に入力する。markdown 入力ルール（"## "→見出し, "- "→箇条書き,
         # "1. "→番号付き, "**"→太字）はテキスト入力で効くので、各ブロックの markdown を
@@ -546,6 +724,7 @@ def main():
     parser.add_argument("--login", action="store_true", help="初回ログイン（表示ありブラウザ）")
     parser.add_argument("--dump", action="store_true", help="実DOMを書き出す（セレクタ特定用）")
     parser.add_argument("--probe-image", action="store_true", help="画像アップロードの仕組みを調べる")
+    parser.add_argument("--probe-eyecatch", action="store_true", help="見出し画像アップロードの仕組みを調べる")
     # note のエディタは headless だと描画されないため常に headful。--headless は実験用。
     parser.add_argument("--headless", action="store_true", help="（実験）headless で動かす")
     args = parser.parse_args()
@@ -557,6 +736,8 @@ def main():
         return cmd_dump(headless=args.headless)
     if args.probe_image:
         return cmd_probe_image(headless=args.headless)
+    if args.probe_eyecatch:
+        return cmd_probe_eyecatch(headless=args.headless)
     return cmd_post(headless=args.headless)
 
 
