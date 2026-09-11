@@ -132,14 +132,56 @@ def _exceeds_full_payout(forecast_dividend, forecast_eps):
     return forecast_dividend / forecast_eps > 1.0
 
 
+def _fetch_earnings(edinet_code):
+    """
+    決算短信(earnings)配列を取得する。
+
+    Returns:
+        list | None: earnings配列（新しい順）。APIエラー時はNone（fail-open）。
+    """
+    try:
+        r = requests.get(
+            f"{BASE_URL}/companies/{edinet_code}/earnings",
+            headers=_headers(),
+            timeout=TIMEOUT,
+        )
+        r.raise_for_status()
+        return r.json().get("data", {}).get("earnings", [])
+    except (requests.RequestException, ValueError) as e:
+        logging.error(f"EDINET earnings fetch failed for {edinet_code}: {e}")
+        return None
+
+
+def _latest_reduction(edinet_code):
+    """
+    決算短信(earnings)から、来期予想が減配(forecast < actual)かを判定する。
+
+    _latest_dividendsで最新の実績と予想を別々に拾い比較する（当期通期予想は
+    直近確定実績の翌期に一致しYoYで整合する）。分割調整後の実績を採れた場合は
+    そのまま比較し、生値にフォールバックした場合のみ予想が分割後ベースと推定
+    されるか（_looks_like_split）をチェックして誤検知を防ぐ。
+
+    Returns:
+        tuple | None: 減配なら (actual, forecast, forecast_eps)。
+                      判定不能・未開示・分割推定・エラー時はNone（fail-open）。
+    """
+    earnings = _fetch_earnings(edinet_code)
+    if earnings is None:
+        return None
+
+    actual, forecast, actual_is_adjusted, forecast_eps = _latest_dividends(earnings)
+    if actual is None or forecast is None:
+        return None
+    if not actual_is_adjusted and _looks_like_split(actual, forecast):
+        return None
+    if not forecast < actual:
+        return None
+    return actual, forecast, forecast_eps
+
+
 def _is_dividend_cut(edinet_code):
     """
     決算短信(earnings)から、来期予想が減配かつ予想配当性向>100%かを判定する。
-
-    earnings.dataは新しい順の配列。_latest_dividendsで最新の実績と予想を別々に
-    拾い比較する（当期通期予想は直近確定実績の翌期に一致しYoYで整合する）。
-    分割調整後の実績を採れた場合はそのまま比較し、生値にフォールバックした場合のみ
-    予想が分割後ベースと推定されるか（_looks_like_split）をチェックして誤検知を防ぐ。
 
     除外は「減配(forecast < actual)」かつ「予想配当性向>100%（下げた後でも利益で
     配当を賄えない）」の両方を満たす場合のみ。市況ピークからの正常化や下限着地など、
@@ -149,29 +191,14 @@ def _is_dividend_cut(edinet_code):
         bool: 減配かつ性向>100%ならTrue。判定不能・未開示・分割推定・エラー時は
               False（fail-open）。
     """
-    try:
-        r = requests.get(
-            f"{BASE_URL}/companies/{edinet_code}/earnings",
-            headers=_headers(),
-            timeout=TIMEOUT,
-        )
-        r.raise_for_status()
-        earnings = r.json().get("data", {}).get("earnings", [])
-    except (requests.RequestException, ValueError) as e:
-        logging.error(f"EDINET earnings fetch failed for {edinet_code}: {e}")
+    reduction = _latest_reduction(edinet_code)
+    if reduction is None:
         return False
-
-    actual, forecast, actual_is_adjusted, forecast_eps = _latest_dividends(earnings)
-    if actual is None or forecast is None:
-        return False
-    if not actual_is_adjusted and _looks_like_split(actual, forecast):
-        return False
-    if not forecast < actual:
-        return False
+    actual, forecast, forecast_eps = reduction
     return _exceeds_full_payout(forecast, forecast_eps)
 
 
-def get_dividend_cut_codes(codes):
+def get_dividend_cut_codes(codes, code_map=None):
     """
     指定証券コードのうち、来期配当予想が減配の銘柄コードのset（文字列）を返す。
 
@@ -180,6 +207,8 @@ def get_dividend_cut_codes(codes):
 
     Args:
         codes (list): 証券コードのリスト（int/str混在可）
+        code_map (dict, optional): build_code_map()の結果を呼び出し側で共有する場合に渡す。
+                                    未指定なら内部でbuild_code_map()を呼ぶ。
 
     Returns:
         set: 減配と判定された証券コードの集合（str）
@@ -188,7 +217,8 @@ def get_dividend_cut_codes(codes):
         logging.error("EDINET get_dividend_cut_codes skipped: EDINETDB_API_KEY未設定")
         return set()
 
-    code_map = build_code_map()
+    if code_map is None:
+        code_map = build_code_map()
     if not code_map:
         return set()
 
@@ -202,3 +232,43 @@ def get_dividend_cut_codes(codes):
         if _is_dividend_cut(edinet_code):
             cut_codes.add(code_str)
     return cut_codes
+
+
+def get_dividend_reductions(codes, code_map=None):
+    """
+    指定証券コードのうち、来期配当予想が減配（性向条件なし）の銘柄について
+    {証券コード(str): (実績配当, 予想配当)} の辞書を返す。
+
+    保有銘柄の減配監視用。選定フィルタ（get_dividend_cut_codes、減配かつ性向>100%）
+    とは別に、性向条件を課さず「減配予想が出たこと自体」を検知する。売る/持つの
+    判断は人間が行う前提で、通知のみに使う。
+
+    Args:
+        codes (list): 証券コードのリスト（int/str混在可）
+        code_map (dict, optional): build_code_map()の結果を呼び出し側で共有する場合に渡す。
+
+    Returns:
+        dict: {"2379": (95.0, 80.0), ...}。APIキー未設定・コード未解決・APIエラー・
+              未開示の銘柄はスキップする（fail-open）。
+    """
+    if not API_KEY:
+        logging.error("EDINET get_dividend_reductions skipped: EDINETDB_API_KEY未設定")
+        return {}
+
+    if code_map is None:
+        code_map = build_code_map()
+    if not code_map:
+        return {}
+
+    reductions = {}
+    for code in codes:
+        code_str = str(code)
+        edinet_code = code_map.get(code_str)
+        if edinet_code is None:
+            logging.error(f"EDINET code unresolved: {code_str}")
+            continue
+        reduction = _latest_reduction(edinet_code)
+        if reduction is not None:
+            actual, forecast, _ = reduction
+            reductions[code_str] = (actual, forecast)
+    return reductions
