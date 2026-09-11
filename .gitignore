@@ -5,6 +5,8 @@
 *.csv
 # 除外リストは出力データではなく設定なので追跡する
 !excluded_stocks.csv
+# 分割マスタも設定側。yfinanceが取り逃した分は手で足すので、消えると復元できない。
+!stock_splits.csv
 *.json
 __pycache__
 test.py
