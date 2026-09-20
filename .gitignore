@@ -7,6 +7,10 @@
 !excluded_stocks.csv
 # 分割マスタも設定側。yfinanceが取り逃した分は手で足すので、消えると復元できない。
 !stock_splits.csv
+# 週次スナップショットは作り直せない（時価総額タブは毎週上書きされ、指数も
+# 過去分を遡って取れない）。所感の「値動き」素材の土台なので追跡する。
+!holdings_history.csv
+!index_history.csv
 *.json
 __pycache__
 test.py

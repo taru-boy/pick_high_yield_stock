@@ -508,10 +508,48 @@ def _split_suspect_note(before, after, threshold=SPLIT_SUSPECT_PCT, drop_only=Fa
     return "　←要確認（分割・併合の可能性）"
 
 
-def _weekly_moves(current, prev):
-    """前回スナップショットと突き合わせ、銘柄ごとの騰落率を大きい順に返す。"""
+def _avg_cost_map(df_holding):
+    """証券コード → 取得平均単価（購入履歴の加重平均）の dict を返す。
+
+    購入履歴タブは pick_high_yield_stock.py が分割・併合のたびに書き換えるので、
+    ここで読む取得単価は今の株価とそのまま比べられる。
+    """
+    if df_holding is None or df_holding.empty:
+        return {}
+    price_col = "取得単価" if "取得単価" in df_holding else "株価"
+    if price_col not in df_holding or "株数" not in df_holding:
+        return {}
+
+    h = pd.DataFrame(
+        {
+            "証券コード": df_holding["証券コード"].astype(str).str.strip(),
+            "_shares": df_holding["株数"].map(_to_number),
+            "_cost": df_holding[price_col].map(_to_number)
+            * df_holding["株数"].map(_to_number),
+        }
+    ).dropna()
+    if h.empty:
+        return {}
+    agg = h.groupby("証券コード")[["_shares", "_cost"]].sum()
+
+    avg_cost = {}
+    for code, r in agg.iterrows():
+        shares, cost = r["_shares"], r["_cost"]
+        if shares and cost:
+            avg_cost[str(code)] = cost / shares
+    return avg_cost
+
+
+def _weekly_moves(current, prev, avg_cost=None):
+    """前回スナップショットと突き合わせ、銘柄ごとの騰落率を大きい順に返す。
+
+    avg_cost（`_avg_cost_map` の戻り値）を渡すと「取得利回り」も添える。
+    買った値段に対する予想配当の利回りで、株価がどう動いても自分の受け取る
+    配当は変わらない、という所感の着地に使う。
+    """
     if current is None or prev is None or prev.empty:
         return []
+    avg_cost = avg_cost or {}
     prev_price = {}
     prev_yield = {}
     for _, r in prev.iterrows():
@@ -525,6 +563,10 @@ def _weekly_moves(current, prev):
         now, before = r["株価"], prev_price.get(code)
         if not now or not before:
             continue
+        # 予想1株配当を「今の株価 × 今の利回り」で復元し、取得単価で割り直す。
+        # 数字の出どころは時価総額タブと購入履歴だけ（新しい情報源を足さない）。
+        cost = avg_cost.get(code)
+        now_yield = r["配当利回り(%)"]
         moves.append(
             {
                 "証券コード": code,
@@ -533,7 +575,9 @@ def _weekly_moves(current, prev):
                 "前": before,
                 "後": now,
                 "利回り前": prev_yield.get(code),
-                "利回り後": r["配当利回り(%)"],
+                "利回り後": now_yield,
+                "取得平均": cost,
+                "取得利回り": (now_yield * now / cost) if (cost and now_yield) else None,
             }
         )
     moves.sort(key=lambda m: m["騰落率"], reverse=True)
@@ -542,33 +586,18 @@ def _weekly_moves(current, prev):
 
 def _cost_basis_moves(df_holding, current):
     """取得来の損益率を銘柄ごとに大きい順で返す（週次データが無い週の代替素材）。"""
-    if current is None or df_holding is None or df_holding.empty:
+    if current is None:
         return []
-    price_col = "取得単価" if "取得単価" in df_holding else "株価"
-    if price_col not in df_holding or "株数" not in df_holding:
+    avg_cost_map = _avg_cost_map(df_holding)
+    if not avg_cost_map:
         return []
-
-    h = pd.DataFrame(
-        {
-            "証券コード": df_holding["証券コード"].astype(str).str.strip(),
-            "_shares": df_holding["株数"].map(_to_number),
-            "_cost": df_holding[price_col].map(_to_number)
-            * df_holding["株数"].map(_to_number),
-        }
-    ).dropna()
-    if h.empty:
-        return []
-    agg = h.groupby("証券コード")[["_shares", "_cost"]].sum()
 
     moves = []
     for _, r in current.iterrows():
         code = str(r["証券コード"]).strip()
-        if code not in agg.index or not r["株価"]:
+        avg_cost = avg_cost_map.get(code)
+        if not avg_cost or not r["株価"]:
             continue
-        shares, cost = agg.loc[code, "_shares"], agg.loc[code, "_cost"]
-        if not shares or not cost:
-            continue
-        avg_cost = cost / shares
         moves.append(
             {
                 "証券コード": code,
@@ -758,7 +787,7 @@ def build_material_memo(df_holding, df_market, df_trend, date_str, index_summary
     # 記録・比較の日付は実行日ではなく、その株価が取れた営業日（_market_data_date）。
     snapshot_date, from_trend = _market_data_date(df_trend, date_str)
     current, snapshot_prev = _snapshot_holdings(df_market, snapshot_date)
-    moves = _weekly_moves(current, snapshot_prev)
+    moves = _weekly_moves(current, snapshot_prev, _avg_cost_map(df_holding))
     lines.append("## 3. 保有銘柄の値動き（前回スナップショットとの比較）")
     lines.append("")
     if moves:
@@ -793,6 +822,12 @@ def build_material_memo(df_holding, df_market, df_trend, date_str, index_summary
             "所感には書かないこと。"
         )
         lines.append("")
+        lines.append(
+            "※ 「取得利回り」は買った値段に対する予想配当の利回り"
+            "（予想1株配当 ÷ 取得平均単価）。株価が動いても変わらない数字なので、"
+            "**所感の項目3・4はこの取得利回りで締めること**。"
+        )
+        lines.append("")
 
         def _move_line(m):
             text = (
@@ -801,6 +836,11 @@ def build_material_memo(df_holding, df_market, df_trend, date_str, index_summary
             )
             if m["利回り前"] and m["利回り後"]:
                 text += f" 利回り {m['利回り前']:.2f}% → {m['利回り後']:.2f}%"
+            if m.get("取得利回り") and m.get("取得平均"):
+                text += (
+                    f" / 取得利回り {m['取得利回り']:.2f}%"
+                    f"（取得平均 {m['取得平均']:,.0f}円）"
+                )
             return text + _split_suspect_note(m["前"], m["後"])
 
 
