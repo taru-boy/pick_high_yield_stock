@@ -6,7 +6,7 @@
 
 ## 全体の位置
 
-毎週土曜 04:40 の cron が `run_pick_high_yield_stock.sh` を叩き、4段を直列で回す。
+毎週金曜 16:30 の cron が `run_pick_high_yield_stock.sh` を叩き、4段を直列で回す。
 
 | 段 | 実体 | リポジトリ | 失敗したら |
 |---|---|---|---|
