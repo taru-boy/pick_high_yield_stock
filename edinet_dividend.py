@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 
 import requests
@@ -69,6 +70,26 @@ def _looks_like_split(actual, forecast):
     return any(abs(ratio - r) / r <= _SPLIT_TOLERANCE for r in _SPLIT_RATIOS)
 
 
+def _split_scale_of_actual(adjusted, raw, factor):
+    """
+    実績配当がどちらの株数基準かを、調整後と生値の比から確定できる範囲で返す。
+
+    adjusted_annual_dividend_per_share は経路依存で、分割の効力発生をまたいだ
+    レコードでも未調整のまま（生値と同じ）で返ることがある（8309 の 2026-07-30 Q1 は
+    185.0 のまま、同じ分割でも 2026-05-14 Q4 は 46.25 に調整済み）。なので
+    「調整後を採れた＝予想と同じ基準」とは言えず、生値÷調整後が分割比に一致した
+    ときだけ分割後基準と確定する。
+
+    Returns:
+        str | None: "post"（分割後基準と確定）。確定できなければNone。
+    """
+    if adjusted is None or raw is None or adjusted <= 0:
+        return None
+    if abs(raw / adjusted - factor) / factor <= _SPLIT_TOLERANCE:
+        return "post"
+    return None
+
+
 def _latest_dividends(earnings):
     """
     新しい順のearnings配列から「最新の実績」「最新の予想」を別々に拾う。
@@ -85,13 +106,23 @@ def _latest_dividends(earnings):
     予想配当性向の算定用に、最新の予想EPS(forecast_eps)も同様に新しい順で拾う
     （forecast_eps は forecast_dividend_per_share と同じ予想期のレコードに入る）。
 
+    あわせて、実績・予想を拾ったレコードが持つ分割シグナル
+    （forecast_split_adjustment_factor / forecast_share_basis）を拾う。分割比は
+    予想側のレコードを優先し、無ければ実績側のレコードのものを使う（分割の効力発生後に
+    出た予想には、関係する分割が無いとして null が入るため）。
+
     Returns:
-        tuple: (actual, forecast, actual_is_adjusted, forecast_eps)。
+        tuple: (actual, forecast, actual_is_adjusted, forecast_eps, split)。
                見つからない側はNone。actual_is_adjustedは調整後実績を採れたか。
+               splitは分割シグナルが無ければNone、あれば
+               {"factor": 分割比, "actual_scale": "post"|None,
+                "forecast_scale": "pre"|"post"|None}。
     """
     actual = None
     actual_is_adjusted = False
+    actual_record = None
     forecast = None
+    forecast_record = None
     forecast_eps = None
 
     for record in earnings:
@@ -101,13 +132,16 @@ def _latest_dividends(earnings):
             if adjusted is not None:
                 actual = adjusted
                 actual_is_adjusted = True
+                actual_record = record
             elif raw is not None:
                 actual = raw
                 actual_is_adjusted = False
+                actual_record = record
         if forecast is None:
             f = record.get("forecast_dividend_per_share")
             if f is not None:
                 forecast = f
+                forecast_record = record
         if forecast_eps is None:
             e = record.get("forecast_eps")
             if e is not None:
@@ -115,7 +149,82 @@ def _latest_dividends(earnings):
         if actual is not None and forecast is not None and forecast_eps is not None:
             break
 
-    return actual, forecast, actual_is_adjusted, forecast_eps
+    split = None
+    factor = None
+    for record in (forecast_record, actual_record):
+        if record is not None and record.get("forecast_split_adjustment_factor") is not None:
+            factor = record.get("forecast_split_adjustment_factor")
+            break
+    if factor is not None and factor > 0 and factor != 1:
+        basis = (
+            forecast_record.get("forecast_share_basis")
+            if forecast_record is not None
+            else None
+        )
+        split = {
+            "factor": factor,
+            "actual_scale": (
+                _split_scale_of_actual(
+                    actual_record.get("adjusted_annual_dividend_per_share"),
+                    actual_record.get("dividend_per_share"),
+                    factor,
+                )
+                if actual_is_adjusted
+                else None
+            ),
+            "forecast_scale": {"pre_split": "pre", "post_split": "post"}.get(basis),
+        }
+
+    return actual, forecast, actual_is_adjusted, forecast_eps, split
+
+
+def _align_split_basis(actual, forecast, forecast_eps, split):
+    """
+    分割シグナルがある銘柄について、実績と予想を同じ株数基準にそろえる。
+
+    基準が確定している側（予想は forecast_share_basis、実績は生値÷調整後の比）は
+    それに従い、確定しない側は「同じ基準」「実績だけ分割前」「予想だけ分割前」の
+    うち矛盾しない解釈から、予想/実績の比が対数距離で1に最も近いものを採る
+    （分割の年に配当が数倍に動くことはまず無い、という前提）。
+
+    実例: 8309 は 2026-08-01 に1:4分割。実績185.0（分割前基準・未調整）と
+    予想47.5（分割後基準）を比べて減配と誤判定していた。本関数で 46.25 → 47.5 の
+    増配にそろう。
+
+    限界: 基準が確定しない銘柄で、分割と同時に 1/√分割比 を超える減配
+    （1:4なら50%超、1:2なら29%超）をすると増配と読み違える。分割の年に大幅減配が
+    重なるのはまれで、判定不能なら警告しない（fail-open）方針とも矛盾しない。
+
+    Returns:
+        tuple: 基準をそろえた (actual, forecast, forecast_eps)。予想EPSは予想配当と
+               同じ係数で割る（性向は変わらない）。
+    """
+    if actual <= 0 or forecast <= 0:
+        # 無配転落(0.0)などは基準によらず比較結果が変わらない
+        return actual, forecast, forecast_eps
+
+    factor = split["factor"]
+    actual_scale = split["actual_scale"]
+    forecast_scale = split["forecast_scale"]
+
+    candidates = []
+    # 同じ基準（両方確定して食い違うときだけ除く）。同点なら生値のまま出したいので先頭に置く
+    if actual_scale is None or forecast_scale is None or actual_scale == forecast_scale:
+        candidates.append((actual, forecast, forecast_eps))
+    # 実績だけ分割前基準
+    if actual_scale in (None, "pre") and forecast_scale in (None, "post"):
+        candidates.append((actual / factor, forecast, forecast_eps))
+    # 予想だけ分割前基準
+    if actual_scale in (None, "post") and forecast_scale in (None, "pre"):
+        candidates.append(
+            (
+                actual,
+                forecast / factor,
+                forecast_eps / factor if forecast_eps is not None else None,
+            )
+        )
+
+    return min(candidates, key=lambda c: abs(math.log(c[1] / c[0])))
 
 
 def _exceeds_full_payout(forecast_dividend, forecast_eps):
@@ -157,22 +266,30 @@ def _latest_reduction(edinet_code):
     決算短信(earnings)から、来期予想が減配(forecast < actual)かを判定する。
 
     _latest_dividendsで最新の実績と予想を別々に拾い比較する（当期通期予想は
-    直近確定実績の翌期に一致しYoYで整合する）。分割調整後の実績を採れた場合は
-    そのまま比較し、生値にフォールバックした場合のみ予想が分割後ベースと推定
+    直近確定実績の翌期に一致しYoYで整合する）。EDINET側に分割シグナルがあれば
+    _align_split_basisで実績と予想の株数基準をそろえてから比較する。シグナルが
+    無い銘柄は、生値にフォールバックした場合のみ予想が分割後ベースと推定
     されるか（_looks_like_split）をチェックして誤検知を防ぐ。
 
     Returns:
-        tuple | None: 減配なら (actual, forecast, forecast_eps)。
+        tuple | None: 減配なら (actual, forecast, forecast_eps)（分割シグナルが
+                      あれば基準をそろえた値）。
                       判定不能・未開示・分割推定・エラー時はNone（fail-open）。
     """
     earnings = _fetch_earnings(edinet_code)
     if earnings is None:
         return None
 
-    actual, forecast, actual_is_adjusted, forecast_eps = _latest_dividends(earnings)
+    actual, forecast, actual_is_adjusted, forecast_eps, split = _latest_dividends(
+        earnings
+    )
     if actual is None or forecast is None:
         return None
-    if not actual_is_adjusted and _looks_like_split(actual, forecast):
+    if split is not None:
+        actual, forecast, forecast_eps = _align_split_basis(
+            actual, forecast, forecast_eps, split
+        )
+    elif not actual_is_adjusted and _looks_like_split(actual, forecast):
         return None
     if not forecast < actual:
         return None
