@@ -65,12 +65,10 @@ PICK_META_PATH = os.path.join(BASE_DIR, "last_pick_meta.json")
 # watch_dividend.py が毎回書き出す今週の高配当候補一覧。
 CANDIDATES_CSV = os.path.join(BASE_DIR, "high_dividend_stocks.csv")
 
-# 旗艦の有料記事（「分析しない」高配当株投資の仕組み）への導線。
-# レポート末尾に毎週このCTAを自動で載せ、無料の集客導線→有料記事 の funnel を
-# 手作業（旧 docs/weekly-report.md 手順6）に頼らず必ず通す。
-# ★ここに旗艦記事の note URL を入れる。空のままなら CTA は出力しない（fail-safe：
-#   壊れた/プレースホルダのリンクを公開しないため）。
-FLAGSHIP_ARTICLE_URL = "https://note.com/tarutaru_bouzu/n/n22a7f1da8e1c"
+# 選び方の考え方を書いたサイト記事（tarubo-works /high-dividend-rules/）への案内。
+# 元は note の有料記事への導線だったが、2026-09 にサイトへ移した（手順は Kindle 本に回す）。
+# 空のままなら CTA は出力しない（fail-safe：壊れたリンクを公開しないため）。
+FLAGSHIP_ARTICLE_URL = "https://tarubo-works.com/high-dividend-rules/"
 
 # 環境変数を読み込む（pick_high_yield_stock.py と同じ認証パターンを流用）
 load_dotenv(dotenv_path="/home/taru-boy/Desktop/get_stock/.env")
@@ -1083,18 +1081,18 @@ def build_markdown(df_holding, df_market, df_trend, graph_files, pie_files, date
             lines.append(f"![{title}]({filename})")
             lines.append("")
 
-    # --- 有料記事への導線（CTA）------------------------------------------
-    # 旗艦記事への入口を毎週固定で載せる（funnel。docs/weekly-report.md 参照）。
-    # 固定文＝毎週同じなので所感の Claude パスは通さない。盛らず・売り込まず、
-    # 説得は旗艦記事の無料パートに任せる。リンクは素のURLを単独行に置く
+    # --- 選び方の考え方への案内（CTA）------------------------------------
+    # サイト記事への入口を毎週固定で載せる（docs/weekly-report.md 参照）。
+    # 固定文＝毎週同じなので所感の Claude パスは通さない。盛らず・売り込まない。
+    # リンクは素のURLを単独行に置く
     # （note は自動リンク／カード化しやすく、GitHub/LINE プレビューでも崩れない）。
     # FLAGSHIP_ARTICLE_URL が空なら丸ごと出さない（壊れたリンクを公開しない）。
     if FLAGSHIP_ARTICLE_URL:
         lines.append("## レポートの裏側")
         lines.append("")
         lines.append(
-            "このレポートを毎週動かしている「銘柄の選び方」そのものは、別の記事に"
-            "全部書いています。罠銘柄の避け方や、分散のかけ方の考え方まで。"
+            "このレポートを毎週動かしているルールが、何を守るために作ってあるのか"
+            "（配当を減らさないこと、自分の判断を減らすこと）を別の記事に書きました。"
             "よければどうぞ。"
         )
         lines.append("")
