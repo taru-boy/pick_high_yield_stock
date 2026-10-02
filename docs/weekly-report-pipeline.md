@@ -26,8 +26,8 @@ get_stock 側が journaling の絶対パスを握っている。**依存は get_
 | 参照元 | 参照先 |
 |---|---|
 | `note_report.py:51` `OUTPUT_DIR` | `journaling/note/reports/`（本体 `.md`・素材メモ・PNG5枚） |
-| `post_to_note.py:50` `REPORT_DIR` | 同上（読み取り＋診断ダンプの書き出し） |
-| `post_to_note.py:58` `SEND_LINE` | `journaling/scripts/send_line.sh` |
+| `post_to_note.py:52` `REPORT_DIR` | 同上（読み取り＋診断ダンプの書き出し） |
+| `post_to_note.py:60` `SEND_LINE` | `journaling/scripts/send_line.sh` |
 | `run_pick_high_yield_stock.sh` | `journaling/scripts/send_line.sh`・`journaling/scripts/weekly_report_note.sh` |
 
 **journaling 側でこれらのパスを動かすと、get_stock が黙って壊れる**（週1の処理なので気づくまで1週間かかる）。journaling の `CLAUDE.md`「移動禁止のパス」がこの表と対になっている。動かすときは両方を同時に直すこと。
@@ -101,6 +101,9 @@ note には公式の投稿 API が無く、エディタは独自の JS ブロッ
 - 本文は markdown を**残したまま**ブロック単位で送る。note のエディタが入力ルールで自動変換するので、`## ` → 大見出し（h2＝目次に出る）／`- ` → 箇条書き／`**…**` → 太字 がそのまま反映される。画像は `![](…)` の位置にインライン挿入される（トレンド3枚＝トレンドグラフ節、円グラフ2枚＝構成節）
 - 改行は `Keys.ENTER`（`"\n"` だと soft break で段落が割れない）
 - **下書き保存まで。「公開に進む」は押さない**（公開前の目視ゲットを人間が通すため）
+- **画像は「アップロード完了」まで待ってから次へ進む**。アップロード途中で次の画像操作をすると、note が JS の `alert("画像アップロード中です")` を出す。この alert が開いたままだと以降の操作がすべて落ち、2026-10-02 には下書き保存ごと失敗した。対策は3つ：見出し画像は `img[alt='eyecatch']` の src が https になるまで待つ。本文画像は alert を閉じて5秒待ち、最大3回までやり直す。保存の前に、本文に `blob:`／`data:` の仮 img が残っていないことを確かめる（最大60秒）
+- **画像が足りなくても下書きは保存する**（fail-open）。LINE の文面が「画像 x/5 枚。足りない分は手で貼ってね」に変わる
+- **`~/.note_profile` は1度に1つの Chrome しか使えない**。`setup_driver()` が `/tmp/note_profile.lock` を取り、先に使っているものが終わるまで最大20分待つ。journaling の `post_draft_to_note.py`・`note_stats.py` も同じ `setup_driver()` を通るので、3本とも直列になる。週次 cron 全体が `/tmp/journal_nightly.lock` を握っているため、そのロックは流用できない
 
 ### セレクタが壊れたときの調べ方
 
