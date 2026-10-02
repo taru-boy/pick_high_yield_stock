@@ -1,5 +1,25 @@
 import pandas as pd
 
+# 選定がどの段階で決まったかのラベル。週次レポートの素材メモに載せ、所感で
+# 「なぜこの銘柄が選ばれたのか」を書けるようにする（選定ロジック自体は変えない）。
+REASON_BY_YIELD = "未保有セクター（利回り上位10から）"
+REASON_BY_DUPLICATES = "未保有セクター（複数指数に重複）"
+REASON_IN_HOLDING_SECTOR = "保有セクター内（銘柄4%・セクター20%の上限内）"
+
+
+def _with_reason(stock, reason):
+    """選定された銘柄（Series）に選定理由を持たせて返す。
+
+    iterrows() が返す Series はコピーなので、キーを足しても元の DataFrame は
+    汚さない。既存の呼び出し側（pick_high_yield_stock.py）は必要な列だけを
+    名前で引いているため、列が1つ増えても壊れない。
+    """
+    if stock is None:
+        return None
+    stock = stock.copy()
+    stock["選定理由"] = reason
+    return stock
+
 
 def candidate_codes(df_stocks):
     """
@@ -36,7 +56,7 @@ def pick_stock_by_yield(df_stocks, held_sector, cut_codes=frozenset()):
         if str(stock["証券コード"]) in cut_codes:
             continue
         if stock["セクター"] not in held_sector:
-            return stock
+            return _with_reason(stock, REASON_BY_YIELD)
     return None
 
 
@@ -54,7 +74,7 @@ def pick_stock_by_duplicates(df_stocks, held_sector, cut_codes=frozenset()):
         if str(stock["証券コード"]) in cut_codes:
             continue
         if stock["セクター"] not in held_sector:
-            return stock
+            return _with_reason(stock, REASON_BY_DUPLICATES)
     return None
 
 
@@ -87,7 +107,7 @@ def pick_stock_in_holding_sector(df_stocks, df_latest_holdings, cut_codes=frozen
         sector_stocks = df_latest_holdings[df_latest_holdings["セクター"] == sector]
         sector_cap = sector_stocks["時価総額"].sum()
         if sector_cap < total_cap * 0.2:
-            return stock
+            return _with_reason(stock, REASON_IN_HOLDING_SECTOR)
     return None
 
 
@@ -118,8 +138,11 @@ def select_stocks(df_stocks, df_latest_holdings, held_sector,
                   cut_codes=frozenset(), n=2):
     """
     select_stock を反復適用して最大 n 銘柄を選定する。
-    各回で選定済みコードを除外集合に、選定済みセクターを保有済みセクターに加え、
-    別セクター優先・コード重複回避を既存ロジックのまま実現する。
+    各回で選定済みコードを除外集合に、選定済みセクターを保有済みセクターに加える。
+    これによりコード重複は常に回避されるが、別セクター優先が効くのは
+    select_stock の第1・2段階（pick_stock_by_yield/pick_stock_by_duplicates）のみ。
+    第3段階の pick_stock_in_holding_sector はセクター20%上限のみで判定し
+    held_sector を見ないため、同一週の2銘柄が同一セクターになることもある。
     """
     picked = []
     held = set(held_sector)

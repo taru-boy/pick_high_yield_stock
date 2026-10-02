@@ -25,12 +25,14 @@ cron では run_pick_high_yield_stock.sh から weekly_report_note.sh の後に�
   python post_to_note.py            # 下書き保存（headful）
 
   # セレクタ調査用の診断モード：
-  python post_to_note.py --dump          # 実DOMを note_dom_dump.html / note_dump.png に
-  python post_to_note.py --probe-image   # 画像挿入の仕組みを確認
+  python post_to_note.py --dump             # 実DOMを note_dom_dump.html / note_dump.png に
+  python post_to_note.py --probe-image      # 本文画像挿入の仕組みを確認
+  python post_to_note.py --probe-eyecatch   # 見出し画像（サムネイル）設定の仕組みを確認
 ────────────────────────────────────────────────────────────────────────
 """
 
 import argparse
+import fcntl
 import os
 import re
 import subprocess
@@ -38,6 +40,7 @@ import sys
 import time
 
 from selenium import webdriver
+from selenium.common.exceptions import NoAlertPresentException, UnexpectedAlertPresentException
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service as ChromeService
 from selenium.webdriver.common.by import By
@@ -55,6 +58,12 @@ NOTE_TOP_URL = "https://note.com/"
 NOTE_NEW_URL = "https://note.com/notes/new"  # 新規投稿エディタ
 ERROR_SHOT = os.path.join(REPORT_DIR, "note_post_error.png")  # 失敗時のスクショ
 SEND_LINE = "/home/taru-boy/Desktop/journaling/scripts/send_line.sh"
+THUMBNAIL_IMAGE = os.path.join(REPORT_DIR, "thumbnail.png")  # note 見出し画像（サムネイル。固定）
+# PROFILE_DIR を使う Chrome を1つに絞るロック。同じ --user-data-dir で2つ起動すると後発
+# （または先発）の selenium が落ちる。journaling の post_draft_to_note.py・note_stats.py も
+# この setup_driver() を通るので、ここで取れば3本とも直列になる。
+PROFILE_LOCK_FILE = "/tmp/note_profile.lock"
+PROFILE_LOCK_WAIT = 20 * 60  # 先客の終了を待つ最大秒（週次の下書き保存は数分で終わる）
 
 # note のエディタ DOM セレクタ。2026-06 時点の editor.note.com の実DOMで確認済み。
 # note の UI 変更でここが最初に壊れる。崩れたら `--dump` で実DOMを取り直して合わせる。
@@ -73,6 +82,20 @@ NOTE_SELECTORS = {
     "save_draft": (By.XPATH, "//button[normalize-space()='下書き保存']"),
     # 「公開に進む」ボタン（★絶対に押さない。誤クリック回避の参照用）
     "to_publish": (By.XPATH, "//button[normalize-space()='公開に進む']"),
+    # 見出し画像（サムネイル）追加ボタン。2026-08-22 に note 側の DOM が変わり、
+    # aria-label が button から中の svg に移った（button[aria-label=...] は空振りする）。
+    # ancestor-or-self で拾えば新旧どちらの DOM でも当たる（実DOMで確認済み）。
+    "eyecatch_add": (By.XPATH, "//*[@aria-label='画像を追加']/ancestor-or-self::button[1]"),
+    # 「画像を追加」クリックで出るメニューの「画像をアップロード」項目
+    # （テキストが「画像をアップロード推奨サイズ：1280×670px」と連結して出るため前方一致）
+    "eyecatch_menu_upload": (By.XPATH, "//button[starts-with(normalize-space(.), '画像をアップロード')]"),
+    # 見出し画像専用の file input（本文用の #note-editor-image-upload-input とは別）
+    "eyecatch_input": (By.ID, "note-editor-eyecatch-input"),
+    # 位置調整（トリミング）モーダル内の「保存」（下書き保存ボタンとはテキストが異なり衝突しない）
+    "eyecatch_crop_save": (By.XPATH, "//div[@role='dialog']//button[normalize-space()='保存']"),
+    # 設定済みの見出し画像。アップロード完了で src が https（assets.st-note.com）になる
+    # （2026-10 に --probe-eyecatch の dump_3 で確認）
+    "eyecatch_img": (By.CSS_SELECTOR, "img[alt='eyecatch']"),
 }
 
 WAIT = 40  # 要素待ちの最大秒（エディタ SPA の描画が遅い）
@@ -162,13 +185,45 @@ def parse_report(md_path):
 
 
 # --- ブラウザ -------------------------------------------------------------
+_profile_lock = None  # 取得済みロックの fd。プロセス終了で閉じて解放される
+
+
+def _acquire_profile_lock():
+    """PROFILE_DIR の排他ロックを取る（空くまで最大 PROFILE_LOCK_WAIT 秒待つ）。
+
+    解放はプロセス終了時に任せる（各スクリプトは1プロセス1ブラウザで終わるため）。
+    journal_nightly.lock は週次 cron 全体が握っているので流用できず、専用ファイルにしている。
+    """
+    global _profile_lock
+    if _profile_lock is not None:
+        return
+    f = open(PROFILE_LOCK_FILE, "w")
+    deadline = time.time() + PROFILE_LOCK_WAIT
+    logged = False
+    while True:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            _profile_lock = f
+            return
+        except BlockingIOError:
+            if time.time() >= deadline:
+                f.close()
+                raise RuntimeError(f"note のプロファイルが {PROFILE_LOCK_WAIT} 秒空かなかった（別の note 自動化が実行中）")
+            if not logged:
+                log("note のプロファイルが使用中。空くまで待つ")
+                logged = True
+            time.sleep(max(0.5, min(10, deadline - time.time())))
+
+
 def setup_driver(headless=False):
     """永続プロファイルで Chrome を起動する。プロファイルにログインが残る。
 
     note のエディタ(editor.note.com)は headless だと永遠にローディングのまま描画されない
     （headless 検出かGPU依存）。このため既定は headful。常駐機の Xwayland(:0) を使う。
     cron でも DISPLAY=:0 を使えるよう、未設定なら :0 を補う。
+    同じプロファイルの二重起動を防ぐため、起動前に PROFILE_LOCK_FILE を取る。
     """
+    _acquire_profile_lock()
     # cron は DISPLAY/XAUTHORITY を持たない。常駐機の Xwayland(:0) に繋げるよう補う。
     os.environ.setdefault("DISPLAY", ":0")
     os.environ.setdefault("XAUTHORITY", os.path.expanduser("~/.Xauthority"))
@@ -274,6 +329,105 @@ def cmd_dump(headless=True):
 
 
 
+EYECATCH_DUMP_HTML_1 = os.path.join(REPORT_DIR, "note_eyecatch_dump_1.html")
+EYECATCH_DUMP_PNG_1 = os.path.join(REPORT_DIR, "note_eyecatch_dump_1.png")
+EYECATCH_DUMP_HTML_2 = os.path.join(REPORT_DIR, "note_eyecatch_dump_2.html")
+EYECATCH_DUMP_PNG_2 = os.path.join(REPORT_DIR, "note_eyecatch_dump_2.png")
+EYECATCH_DUMP_HTML_3 = os.path.join(REPORT_DIR, "note_eyecatch_dump_3.html")
+EYECATCH_DUMP_PNG_3 = os.path.join(REPORT_DIR, "note_eyecatch_dump_3.png")
+
+
+def _dump_dom(driver, html_path, png_path, sel, label):
+    script = r"""
+    const sel = arguments[0];
+    const seen = new Set();
+    const out = [];
+    document.querySelectorAll(sel).forEach(el => {
+      let html = el.outerHTML;
+      const open = html.split('>')[0] + '>';
+      const text = (el.textContent || '').trim().slice(0, 40);
+      const key = open + '|' + text;
+      if (seen.has(key)) return;
+      seen.add(key);
+      out.push(open + (text ? '  «' + text + '»' : ''));
+    });
+    return out.join('\n');
+    """
+    dom = driver.execute_script(script, sel)
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(f"<!-- {label} / URL: {driver.current_url} -->\n")
+        f.write(dom or "(要素が取れませんでした)")
+    driver.save_screenshot(png_path)
+    log(f"ダンプ（{label}）: {html_path} / {png_path}")
+
+
+def cmd_probe_eyecatch(headless=False):
+    """見出し画像（サムネイル）アップロードの仕組みを調べる診断モード。
+
+    人手での観察は挟まず、実際に THUMBNAIL_IMAGE を file input まで送って
+    2段階（クリック直後 / 画像送信後の位置調整パネル）の実DOMとスクショを
+    保存して終了する。**保存系ボタンは一切クリックしない**（下書きも公開もしない、
+    観察専用）。screenshot は後で Read ツールで目視確認できる。
+    """
+    if not os.path.isdir(PROFILE_DIR):
+        log("ログイン用プロファイルがありません。先に `python post_to_note.py --login` を実行してください。")
+        return 1
+    sel = "input[type='file'], button, img, [role='menu'] *, [role='dialog'] *, [class*='crop' i], [class*='Crop' i]"
+    driver = setup_driver(headless=headless)
+    try:
+        driver.get(NOTE_NEW_URL)
+        if not wait_for_editor(driver):
+            log("エディタが出ませんでした")
+            return 1
+
+        # 見出し画像の「画像を追加」ボタンを探して押す
+        add_btn = driver.find_elements(*NOTE_SELECTORS["eyecatch_add"])
+        log(f"「画像を追加」ボタン数: {len(add_btn)}")
+        if not add_btn:
+            log("「画像を追加」ボタンが見つかりませんでした")
+            return 1
+        driver.execute_script("arguments[0].click();", add_btn[-1])
+        time.sleep(2)
+        _dump_dom(driver, EYECATCH_DUMP_HTML_1, EYECATCH_DUMP_PNG_1, sel, "click直後")
+
+        # メニューの「画像をアップロード」を押す（テキスト先頭一致。推奨サイズ文言が同居するため）
+        upload_opt = driver.find_elements(
+            By.XPATH, "//button[starts-with(normalize-space(.), '画像をアップロード')]"
+        )
+        log(f"「画像をアップロード」項目数: {len(upload_opt)}")
+        if upload_opt:
+            driver.execute_script("arguments[0].click();", upload_opt[-1])
+            time.sleep(2)
+
+        inputs = driver.find_elements(By.CSS_SELECTOR, "input[type='file']")
+        log(f"「画像をアップロード」押下後 file input 数: {len(inputs)}")
+        if not inputs:
+            log("file input が見つかりませんでした（dump1 を確認してください）")
+            return 0
+        for i, el in enumerate(inputs):
+            html = driver.execute_script("return arguments[0].outerHTML;", el)
+            log(f"  input[{i}]: {html[:300]}")
+        log(f"画像送信開始: {THUMBNAIL_IMAGE}")
+        inputs[-1].send_keys(THUMBNAIL_IMAGE)
+        log("画像送信 send_keys 呼び出し完了（ここまで到達）")
+        time.sleep(3)
+        _dump_dom(driver, EYECATCH_DUMP_HTML_2, EYECATCH_DUMP_PNG_2, sel, "画像送信後（位置調整パネル想定）")
+
+        # 位置調整パネルの「保存」（トリミングモーダル内。下書き保存とは別ボタン）を押して
+        # 見出し画像が実際に反映されるところまで確認する（note の下書き保存は押さない＝
+        # このドラフト自体は保存されない想定）。
+        crop_save = driver.find_elements(By.XPATH, "//div[@role='dialog']//button[normalize-space()='保存']")
+        log(f"位置調整パネルの「保存」ボタン数: {len(crop_save)}")
+        if crop_save:
+            driver.execute_script("arguments[0].click();", crop_save[-1])
+            time.sleep(10)  # 反映（サーバ処理）待ち。probe では余裕を見て長めに待つ
+            _dump_dom(driver, EYECATCH_DUMP_HTML_3, EYECATCH_DUMP_PNG_3, sel, "見出し画像 保存後")
+        log("観察用ダンプ完了。note の下書き保存は押していません。")
+        return 0
+    finally:
+        driver.quit()
+
+
 def _is_logged_in(driver):
     """ログイン済みかの簡易判定（ログインボタンが見えなければログイン済みとみなす）。"""
     driver.get(NOTE_TOP_URL)
@@ -356,6 +510,30 @@ def _count_uploaded_images(driver):
     ) or 0
 
 
+def _count_pending_images(driver):
+    """本文(ProseMirror)内で、まだアップロード中（blob:/data: の仮 src）の <img> 枚数を数える。"""
+    return driver.execute_script(
+        "return [...document.querySelectorAll(\"div.ProseMirror[contenteditable='true'] img\")]"
+        ".filter(im => /^(blob|data):/i.test(im.getAttribute('src') || '')).length;"
+    ) or 0
+
+
+def _dismiss_upload_alert(driver):
+    """note の「画像アップロード中です」などの JS alert が開いていれば閉じて True を返す。
+
+    アップロード完了前に次の画像操作をすると note が alert を出し、開いたままだと
+    以降の WebDriver 操作がすべて UnexpectedAlertPresentException で落ちる。
+    """
+    try:
+        alert = driver.switch_to.alert
+        text = alert.text
+        alert.accept()
+        log(f"  alert を閉じた: {text}")
+        return True
+    except NoAlertPresentException:
+        return False
+
+
 def insert_images_at_cursor(driver, paths):
     """カーソル位置（本文末尾）に画像を **1枚ずつ確実に** 挿入する（成功枚数を返す）。
 
@@ -365,6 +543,8 @@ def insert_images_at_cursor(driver, paths):
     取りこぼすことがあるため、まとめ送りはしない。各挿入後、本文のアップ済み <img>
     枚数が1枚増える（=サーバ保存完了）まで待ってから次へ進む。これで取りこぼしと
     「保存が早すぎてアップロード未完で落ちる」レースの両方を防ぐ。
+    note が「画像アップロード中です」alert を出したら、閉じて5秒待ち、同じ画像を
+    最大3回までやり直す（alert を開いたままにすると下書き保存まで落ちるため）。
     """
     paths = [p for p in paths if os.path.exists(p)]
     if not paths:
@@ -372,45 +552,145 @@ def insert_images_at_cursor(driver, paths):
     inserted = 0
     for p in paths:
         before = _count_uploaded_images(driver)
-        try:
-            plus = driver.find_elements(*NOTE_SELECTORS["block_plus"])
-            if not plus:
-                log("  「+」ブロックメニューが見つからず（以降の画像スキップ）")
-                break
-            driver.execute_script("arguments[0].click();", plus[-1])
-            time.sleep(1.2)
-            imgopt = driver.find_elements(*NOTE_SELECTORS["menu_image"])
-            if not imgopt:
-                log("  メニュー「画像」が見つからず（以降の画像スキップ）")
-                break
-            driver.execute_script("arguments[0].click();", imgopt[-1])
-            time.sleep(1.2)
-            inputs = driver.find_elements(*NOTE_SELECTORS["image_input"])
-            if not inputs:
-                log("  画像アップロード input が見つからず（以降の画像スキップ）")
-                break
-            inputs[-1].send_keys(p)  # 1枚だけ送る
-            # アップ済み <img> が1枚増える（=サーバ保存完了）まで待つ。
-            deadline = time.time() + 30
-            uploaded_ok = False
-            while time.time() < deadline:
-                if _count_uploaded_images(driver) >= before + 1:
-                    uploaded_ok = True
+        for attempt in range(1, 4):
+            try:
+                if attempt > 1 and _count_uploaded_images(driver) >= before + 1:
+                    # alert の裏で前回のアップロードが実は終わっていた（二重挿入しない）
+                    inserted += 1
+                    log(f"  画像挿入: {os.path.basename(p)}（{inserted}/{len(paths)}）")
                     break
-                time.sleep(1)
-            # 次の挿入/本文入力に備え、カーソルを本文末尾へ戻す
-            body = driver.find_element(*NOTE_SELECTORS["body"])
-            body.click()
-            body.send_keys(Keys.CONTROL, Keys.END)
-            if uploaded_ok:
-                inserted += 1
-                log(f"  画像挿入: {os.path.basename(p)}（{inserted}/{len(paths)}）")
-            else:
-                log(f"  画像のアップロード確認がタイムアウト（スキップ）: {os.path.basename(p)}")
-        except Exception as e:  # noqa: BLE001
-            log(f"  画像挿入に失敗（スキップ）: {os.path.basename(p)}: {e}")
-            continue
+                result = _insert_one_image(driver, p, before)
+                if result is None:
+                    return inserted  # 「+」メニュー等が無い＝以降も無理なので打ち切る
+                if result:
+                    inserted += 1
+                    log(f"  画像挿入: {os.path.basename(p)}（{inserted}/{len(paths)}）")
+                else:
+                    log(f"  画像のアップロード確認がタイムアウト（スキップ）: {os.path.basename(p)}")
+                break
+            except UnexpectedAlertPresentException as e:
+                # 「画像アップロード中です」alert。閉じて待ってから同じ画像をやり直す
+                log(f"  alert で中断（{attempt}/3）: {os.path.basename(p)}: {e.alert_text}")
+                _dismiss_upload_alert(driver)
+                time.sleep(5)
+            except Exception as e:  # noqa: BLE001
+                log(f"  画像挿入に失敗（スキップ）: {os.path.basename(p)}: {e}")
+                break
+        else:
+            log(f"  alert が続いたため画像をスキップ: {os.path.basename(p)}")
     return inserted
+
+
+def _insert_one_image(driver, p, before):
+    """「+」→「画像」→ file input に1枚送り、アップ済み <img> が増えるまで待つ。
+
+    成功で True、タイムアウトで False、メニュー等が見つからなければ None を返す。
+    alert による例外は呼び出し側（insert_images_at_cursor）でやり直しに回す。
+    """
+    plus = driver.find_elements(*NOTE_SELECTORS["block_plus"])
+    if not plus:
+        log("  「+」ブロックメニューが見つからず（以降の画像スキップ）")
+        return None
+    driver.execute_script("arguments[0].click();", plus[-1])
+    time.sleep(1.2)
+    imgopt = driver.find_elements(*NOTE_SELECTORS["menu_image"])
+    if not imgopt:
+        log("  メニュー「画像」が見つからず（以降の画像スキップ）")
+        return None
+    driver.execute_script("arguments[0].click();", imgopt[-1])
+    time.sleep(1.2)
+    inputs = driver.find_elements(*NOTE_SELECTORS["image_input"])
+    if not inputs:
+        log("  画像アップロード input が見つからず（以降の画像スキップ）")
+        return None
+    inputs[-1].send_keys(p)  # 1枚だけ送る
+    # アップ済み <img> が1枚増える（=サーバ保存完了）まで待つ。
+    deadline = time.time() + 30
+    uploaded_ok = False
+    while time.time() < deadline:
+        if _count_uploaded_images(driver) >= before + 1:
+            uploaded_ok = True
+            break
+        time.sleep(1)
+    # 次の挿入/本文入力に備え、カーソルを本文末尾へ戻す
+    body = driver.find_element(*NOTE_SELECTORS["body"])
+    body.click()
+    body.send_keys(Keys.CONTROL, Keys.END)
+    return uploaded_ok
+
+
+def set_eyecatch(driver, path):
+    """見出し画像（サムネイル）を設定する。成功したら True。
+
+    手順（実DOMで確認・--probe-eyecatch）：「画像を追加」→ メニュー「画像をアップロード」
+    → file input (#note-editor-eyecatch-input) に1枚送信 → 位置調整（トリミング）モーダルの
+    「保存」を押す。モーダルが閉じた後、見出し画像の <img> の src が https（=サーバへの
+    アップロード完了）になるまで待つ。モーダルが閉じただけで本文の画像挿入に進むと、
+    note が「画像アップロード中です」alert を出して後続の操作がすべて落ちるため。
+    見出し画像はあくまで付加価値（fail-open）: 途中で要素が見つからない・タイムアウトしても
+    例外を投げず False を返すだけにし、呼び出し側（cmd_post）は下書き保存を続行する。
+    """
+    if not os.path.exists(path):
+        log(f"見出し画像が見つかりません（スキップ）: {path}")
+        return False
+    try:
+        add_btn = driver.find_elements(*NOTE_SELECTORS["eyecatch_add"])
+        if not add_btn:
+            log("  見出し画像「画像を追加」ボタンが見つからず（スキップ）")
+            return False
+        driver.execute_script("arguments[0].click();", add_btn[-1])
+        time.sleep(1.5)
+
+        upload_opt = driver.find_elements(*NOTE_SELECTORS["eyecatch_menu_upload"])
+        if not upload_opt:
+            log("  見出し画像メニュー「画像をアップロード」が見つからず（スキップ）")
+            return False
+        driver.execute_script("arguments[0].click();", upload_opt[-1])
+        time.sleep(1.5)
+
+        inputs = driver.find_elements(*NOTE_SELECTORS["eyecatch_input"])
+        if not inputs:
+            log("  見出し画像の file input が見つからず（スキップ）")
+            return False
+        inputs[-1].send_keys(path)
+
+        # 位置調整（トリミング）モーダルが現れるのを待つ
+        deadline = time.time() + 20
+        crop_save = []
+        while time.time() < deadline:
+            crop_save = driver.find_elements(*NOTE_SELECTORS["eyecatch_crop_save"])
+            if crop_save:
+                break
+            time.sleep(1)
+        if not crop_save:
+            log("  位置調整パネルの「保存」ボタンが現れず（スキップ）")
+            return False
+        driver.execute_script("arguments[0].click();", crop_save[-1])
+
+        # モーダルが閉じるのを待つ
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            if not driver.find_elements(By.CSS_SELECTOR, "div[role='dialog']"):
+                break
+            time.sleep(1)
+        else:
+            log("  見出し画像のモーダルが閉じない（保存自体は押下済み）")
+
+        # サーバへのアップロード完了（見出し画像の src が https になる）まで待つ
+        deadline = time.time() + 30
+        while time.time() < deadline:
+            if not _dismiss_upload_alert(driver) and driver.execute_script(
+                "const im = document.querySelector(arguments[0]);"
+                "return !!im && /^https?:/i.test(im.getAttribute('src') || '');",
+                NOTE_SELECTORS["eyecatch_img"][1],
+            ):
+                return True
+            time.sleep(1)
+        log("  見出し画像のアップロード完了確認がタイムアウト（保存自体は押下済み）")
+        return True
+    except Exception as e:  # noqa: BLE001
+        log(f"  見出し画像の設定に失敗（スキップ）: {e}")
+        return False
 
 
 def cmd_post(headless=False):
@@ -429,7 +709,12 @@ def cmd_post(headless=False):
     log(f"タイトル: {title}")
     log(f"本文ブロック: 文 {n_text} / 画像 {n_img}")
 
-    driver = setup_driver(headless=headless)
+    try:
+        driver = setup_driver(headless=headless)
+    except RuntimeError as e:  # プロファイルのロック待ちタイムアウト
+        log(f"note 下書き保存に失敗: {e}")
+        notify_line("⚠️ note 自動下書き: 別の note 自動化が終わらず実行できなかった。post_to_note.py を手で流してね")
+        return 1
     wait = WebDriverWait(driver, WAIT)
     try:
         if not _is_logged_in(driver):
@@ -448,6 +733,14 @@ def cmd_post(headless=False):
         title_el.click()
         title_el.send_keys(title)
         log("タイトル入力 完了")
+
+        # 見出し画像（サムネイル）。本文入力より前に置く（本文入力後に開くとカーソル状態が
+        # 乱れるのを避けるため）。付加価値なので失敗しても下書き保存自体は続行する（fail-open）。
+        eyecatch_ok = set_eyecatch(driver, THUMBNAIL_IMAGE)
+        if eyecatch_ok:
+            log("見出し画像（サムネイル）設定 完了")
+        else:
+            log("見出し画像の設定はスキップされました（下書きは継続）")
 
         # 本文をブロック順に入力する。markdown 入力ルール（"## "→見出し, "- "→箇条書き,
         # "1. "→番号付き, "**"→太字）はテキスト入力で効くので、各ブロックの markdown を
@@ -515,7 +808,19 @@ def cmd_post(headless=False):
         log(f"本文入力 完了（画像 {uploaded}/{n_img} 枚）")
 
         # 画像のサーバー側アップロード完了を待ってから保存（早すぎると画像が落ちる）。
-        time.sleep(3 + 2 * uploaded)
+        # 本文に blob:/data: の仮 img が残っている間はアップロード中。
+        deadline = time.time() + 60
+        while True:
+            _dismiss_upload_alert(driver)
+            pending = _count_pending_images(driver)
+            if pending == 0:
+                break
+            if time.time() >= deadline:
+                log(f"アップロード中の画像が残ったまま保存へ進む（{pending} 枚）")
+                break
+            time.sleep(1)
+        time.sleep(2)
+        _dismiss_upload_alert(driver)
 
         # 下書き保存（「公開に進む」は絶対に押さない）
         save_btn = wait.until(EC.element_to_be_clickable(NOTE_SELECTORS["save_draft"]))
@@ -526,7 +831,14 @@ def cmd_post(headless=False):
         # マガジン指定は公開設定パネル内で UI が深い。下書きを作るところまでを確実にし、
         # マガジン指定は公開時（手動ゲート）にたる坊が行う運用にする。
         log(f"下書き保存 完了（公開はしていない）: {driver.current_url}")
-        notify_line("📝 note に週次レポートの下書きを保存したよ。所感を確認して公開してね")
+        # 画像は付加価値（fail-open）。足りなくても下書きは残し、何が足りないかを知らせる。
+        msg = "📝 note に週次レポートの下書きを保存したよ。所感を確認して公開してね"
+        if uploaded < n_img:
+            msg = (f"📝 note に週次レポートの下書きを保存したよ。ただし画像 {uploaded}/{n_img} 枚。"
+                   "足りない分は手で貼ってね")
+        if not eyecatch_ok:
+            msg += "\n見出し画像（サムネイル）も未設定なので手で設定してね"
+        notify_line(msg)
         return 0
     except Exception as e:  # noqa: BLE001
         try:
@@ -546,6 +858,7 @@ def main():
     parser.add_argument("--login", action="store_true", help="初回ログイン（表示ありブラウザ）")
     parser.add_argument("--dump", action="store_true", help="実DOMを書き出す（セレクタ特定用）")
     parser.add_argument("--probe-image", action="store_true", help="画像アップロードの仕組みを調べる")
+    parser.add_argument("--probe-eyecatch", action="store_true", help="見出し画像アップロードの仕組みを調べる")
     # note のエディタは headless だと描画されないため常に headful。--headless は実験用。
     parser.add_argument("--headless", action="store_true", help="（実験）headless で動かす")
     args = parser.parse_args()
@@ -557,6 +870,8 @@ def main():
         return cmd_dump(headless=args.headless)
     if args.probe_image:
         return cmd_probe_image(headless=args.headless)
+    if args.probe_eyecatch:
+        return cmd_probe_eyecatch(headless=args.headless)
     return cmd_post(headless=args.headless)
 
 
