@@ -69,6 +69,7 @@ get_stock 側が journaling の絶対パスを握っている。**依存は get_
 - **相場の指数**は `market_index.py` が日経の指数値一覧ページ（Selenium。requests だと 403）から取り、`index_history.csv` に追記して前週比を出す
   - TOPIX は入れていない：日経の指数サイトが持っておらず、日経電子版・JPX 側はログイン壁や JS 描画で安定して取れなかった。ポートフォリオの母集団が日経の3指数（高配当株50／累進高配当株／連続増配株）なので、そちらを並べるほうが素材としても素直
 - どちらの CSV も `.gitignore` で**明示的に追跡している**（`!holdings_history.csv` / `!index_history.csv`）。作り直せないため——時価総額タブは毎週上書きされ、指数も過去分を遡って取れない
+- 週次 cron（`run_pick_high_yield_stock.sh`）の最後で、この2つと `stock_splits.csv` に差分があれば**自動でコミットして push する**（2026-10-02〜）。対象は3ファイルだけで、手作業で stage 中のものは巻き込まない。push は現在のブランチへ行う。失敗しても fail-open で、まとめの LINE に「履歴CSVのpush」として出る
 
 ### 行のキーは「実行日」ではなく「その値が属する営業日」
 

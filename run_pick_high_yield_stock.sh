@@ -43,6 +43,17 @@ python note_report.py >> "$LOG" 2>&1 || { echo "レポート生成失敗" >> "$L
 # 所感入りの完成版レポートを note の下書きに流し込む（公開はしない）。
 python post_to_note.py >> "$LOG" 2>&1 || { echo "note下書き保存失敗" >> "$LOG"; FAILURES="$FAILURES note下書き保存"; }
 
+# 週次で追記される履歴CSVを GitHub に残す（作り直せないデータのため。ディスク故障の保険）。
+# 時価総額タブは毎週上書きされ、指数も遡って取れないので、ここにしか過去が残らない。
+# pathspec 付き commit なので、手作業で stage 中の他ファイルは巻き込まない。差分が無ければ何もしない。
+HISTORY_FILES="holdings_history.csv index_history.csv stock_splits.csv"
+if ! git diff --quiet HEAD -- $HISTORY_FILES; then
+  {
+    git commit -m "週次実行（$(date +%F)）で追記された履歴CSVを記録する" -- $HISTORY_FILES \
+      && git push origin HEAD
+  } >> "$LOG" 2>&1 || { echo "履歴CSVのコミット・push失敗" >> "$LOG"; FAILURES="$FAILURES 履歴CSVのpush"; }
+fi
+
 # 仮想環境を無効化
 deactivate
 
