@@ -11,6 +11,10 @@
 # 過去分を遡って取れない）。所感の「値動き」素材の土台なので追跡する。
 !holdings_history.csv
 !index_history.csv
+# 東証33業種の対応表も設定側。消えると選定が止まる（pick_high_yield_stock.py は空なら中断）。
+!sector33.csv
+# 業種区分切り替え（2026-10）の旧値の控え。戻すときに使う。
+!sector_migration_2026-10.csv
 *.json
 __pycache__
 test.py
