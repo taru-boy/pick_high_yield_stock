@@ -14,6 +14,7 @@ import csv
 import logging
 import os
 import re
+from datetime import date, datetime
 from io import BytesIO
 from urllib.parse import urljoin
 
@@ -32,6 +33,11 @@ _DATA_LINK_RE = re.compile(r'href="([^"]*data_j\.xlsx?)"')
 
 # 対応表に無いコードの業種。保有の集計で行を落とさないために使う。
 UNKNOWN_SECTOR = "不明"
+
+# JPX の一覧は月末時点のものが月1回出る。データ日付がこれより古ければ、
+# 取り直しが失敗し続けている（ページの作りが変わった等）とみなして知らせる。
+# 普段でも「前月末＋公開まで（翌月の半ばごろまで）」で45日前後は古くなるので、2か月で切る。
+STALE_AFTER_DAYS = 62
 
 REQUEST_TIMEOUT = 60
 USER_AGENT = (
@@ -67,6 +73,38 @@ def load_sector_map(path=SECTOR_CSV):
         logging.error(f"33業種の対応表を読めませんでした: {path}: {e}")
         return {}
     return sector_map
+
+
+def latest_data_date(path=SECTOR_CSV):
+    """sector33.csv のデータ日付（JPX の一覧の基準日）のうち最新のもの。読めなければ None。"""
+    dates = []
+    for row in _read_csv_rows(path):
+        try:
+            dates.append(datetime.strptime(row.get("データ日付", "").strip(), "%Y%m%d").date())
+        except ValueError:
+            continue
+    return max(dates) if dates else None
+
+
+def stale_warning(path=SECTOR_CSV, today=None):
+    """
+    対応表が古すぎるときの警告文（LINE に載せる1行）。問題なければ None。
+
+    refresh_sector_map() は失敗しても黙って既存CSVで続けるので、失敗が続いても
+    気づけない。取得の成否ではなくデータ日付の古さで見ることで、失敗の種類に
+    よらず（ネットワーク・ページ変更・列名変更）拾える。
+    """
+    today = today or date.today()
+    latest = latest_data_date(path)
+    if latest is None:
+        return "33業種の対応表（sector33.csv）のデータ日付が読めません"
+    age = (today - latest).days
+    if age > STALE_AFTER_DAYS:
+        return (
+            f"33業種の対応表が古いままです（データ日付 {latest:%Y-%m-%d}、{age}日前）。"
+            "JPX からの取り直しが失敗し続けている可能性があります"
+        )
+    return None
 
 
 def sector_of(code, sector_map):
