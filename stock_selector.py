@@ -2,9 +2,10 @@ import pandas as pd
 
 # 選定がどの段階で決まったかのラベル。週次レポートの素材メモに載せ、所感で
 # 「なぜこの銘柄が選ばれたのか」を書けるようにする（選定ロジック自体は変えない）。
-REASON_BY_YIELD = "未保有セクター（利回り上位10から）"
-REASON_BY_DUPLICATES = "未保有セクター（複数指数に重複）"
-REASON_IN_HOLDING_SECTOR = "保有セクター内（銘柄4%・セクター20%の上限内）"
+# 本（東証33業種）と用語をそろえて「業種」と書く。DataFrame の列名は互換のため「セクター」のまま。
+REASON_BY_YIELD = "未保有業種（利回り上位10から）"
+REASON_BY_DUPLICATES = "未保有業種（複数指数に重複）"
+REASON_IN_HOLDING_SECTOR = "保有業種内（銘柄4%・業種20%の上限内）"
 
 
 def _with_reason(stock, reason):

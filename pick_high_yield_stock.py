@@ -33,7 +33,13 @@ from stock_splits import (
 )
 
 # 東証33業種の対応表をインポート
-from tse_sector import UNKNOWN_SECTOR, load_sector_map, refresh_sector_map, sector_of
+from tse_sector import (
+    UNKNOWN_SECTOR,
+    load_sector_map,
+    refresh_sector_map,
+    sector_of,
+    stale_warning,
+)
 
 # LINE通知関数をインポート
 from line_notify import send_line
@@ -151,8 +157,12 @@ def update_worksheet_with_holdings(gc, spreadsheet_key, df_latest_holdings):
 
 # 業種は東証33業種で数える（JPX の銘柄一覧から作った sector33.csv が正）。
 # 取り直しはベストエフォートで、落ちても既存CSVで続行する。
-for _code, _old, _new in refresh_sector_map():
+sector_changes = refresh_sector_map()
+for _code, _old, _new in sector_changes:
     print(f"[info] 33業種が変わりました: {_code} {_old} → {_new}")
+sector_stale_warning = stale_warning()
+if sector_stale_warning:
+    print(f"[warn] {sector_stale_warning}")
 sector_map = load_sector_map()
 if not sector_map:
     # 業種が全部「不明」のまま選ぶと20%上限が効かなくなるので、ここは止める
@@ -289,6 +299,19 @@ PICK_META_PATH = os.path.join(
 picked_meta = []
 
 warning_lines = []
+# 保有銘柄の業種が JPX 側で変わると20%上限の計算が変わるので、そのぶんだけ知らせる
+# （候補だけの銘柄の変更は選定に効くだけで、こちらが何かする必要はないので出さない）
+held_code_strs = {str(c) for c in held_codes}
+held_sector_changes = [c for c in sector_changes if c[0] in held_code_strs]
+if held_sector_changes:
+    warning_lines.append("⚠️保有銘柄の33業種が変わりました（JPX の月次更新）")
+    for code_str, old, new in held_sector_changes:
+        name = held_name_map.get(code_str, code_str)
+        warning_lines.append(f"・{name} ({code_str}): {old} → {new}")
+    warning_lines.append("")
+if sector_stale_warning:
+    warning_lines.append(f"⚠️{sector_stale_warning}")
+    warning_lines.append("")
 if unknown_sector_codes:
     warning_lines.append(f"⚠️33業種が不明のため候補から除外: {', '.join(sorted(unknown_sector_codes))}")
     warning_lines.append("")

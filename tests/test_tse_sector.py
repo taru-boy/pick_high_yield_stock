@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import unittest
+from datetime import date
 from io import BytesIO
 from unittest import mock
 
@@ -104,6 +105,14 @@ class LoadAndRefreshTest(unittest.TestCase):
         with mock.patch.object(tse_sector, "_download_listing", side_effect=OSError("down")):
             self.assertEqual(tse_sector.refresh_sector_map(self.path), [])
         self.assertEqual(tse_sector.load_sector_map(self.path), {"9104": "海運業"})
+
+    def test_stale_warning(self):
+        self.assertIsNotNone(tse_sector.stale_warning(self.path, today=date(2026, 10, 5)))  # CSV 無し
+        self.refresh([("9104", "商船三井", "海運業")])  # データ日付 2026-08-31
+        self.assertIsNone(tse_sector.stale_warning(self.path, today=date(2026, 10, 15)))
+        self.assertIsNone(tse_sector.stale_warning(self.path, today=date(2026, 11, 1)))  # 62日目
+        message = tse_sector.stale_warning(self.path, today=date(2026, 11, 2))
+        self.assertIn("2026-08-31", message)
 
 
 if __name__ == "__main__":
