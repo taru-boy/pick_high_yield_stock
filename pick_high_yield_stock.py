@@ -32,6 +32,9 @@ from stock_splits import (
     refresh_splits_from_yfinance,
 )
 
+# 東証33業種の対応表をインポート
+from tse_sector import UNKNOWN_SECTOR, load_sector_map, refresh_sector_map, sector_of
+
 # LINE通知関数をインポート
 from line_notify import send_line
 
@@ -146,6 +149,15 @@ def update_worksheet_with_holdings(gc, spreadsheet_key, df_latest_holdings):
     )
 
 
+# 業種は東証33業種で数える（JPX の銘柄一覧から作った sector33.csv が正）。
+# 取り直しはベストエフォートで、落ちても既存CSVで続行する。
+for _code, _old, _new in refresh_sector_map():
+    print(f"[info] 33業種が変わりました: {_code} {_old} → {_new}")
+sector_map = load_sector_map()
+if not sector_map:
+    # 業種が全部「不明」のまま選ぶと20%上限が効かなくなるので、ここは止める
+    raise RuntimeError("sector33.csv が読めません（東証33業種の対応表が空）")
+
 # 「購入履歴」シートを開き、データを取得
 worksheet = gc.open_by_key(spreadsheet_key).worksheet("購入履歴")
 data = worksheet.get_all_values()
@@ -167,9 +179,9 @@ if not df_holding.empty:
     # 証券コードごとに保有株数を集計
     df_holding_number = df_holding.groupby("証券コード", as_index=False)["株数"].sum()
 
-    # 保有銘柄のセクター辞書を作成
+    # 保有銘柄のセクター辞書を作成（購入履歴の列ではなく33業種の対応表から引く）
     codes = list(df_holding["証券コード"].unique())
-    holding_sector_dict = get_holding_sector_dict(df_holding, codes)
+    holding_sector_dict = get_holding_sector_dict(codes, sector_map)
 
     # 最新の保有銘柄データを計算
     df_latest_holdings, sector_order = calculate_latest_holdings(
@@ -200,9 +212,20 @@ if not df_holding.empty:
 
 
 # 最新の配当データを取得し、データフレームを作成
-high_dividend_codes, progressive_codes, consecutive_codes, sector_dict = (
+high_dividend_codes, progressive_codes, consecutive_codes, _nikkei_sector_dict = (
     get_high_dividend_stock_codes()
 )
+# 指数ページの業種（日経の分類）は使わず、33業種で付け直す
+sector_dict = {
+    code: sector_of(code, sector_map)
+    for code in high_dividend_codes + progressive_codes + consecutive_codes
+}
+# 対応表に無い銘柄（新規上場直後など）は業種が決まらないので選定から外す
+unknown_sector_codes = {
+    str(code) for code, sector in sector_dict.items() if sector == UNKNOWN_SECTOR
+}
+if unknown_sector_codes:
+    print(f"33業種が不明のため除外: {sorted(unknown_sector_codes)}")
 df_stocks = create_latest_dividend_dataframe(
     high_dividend_codes, progressive_codes, consecutive_codes, sector_dict
 )
@@ -218,12 +241,14 @@ worksheet.update(
     range_name="A1",
 )
 
-held_sector = df_holding["セクター"].unique()
+held_sector = (
+    df_latest_holdings["セクター"].unique() if not df_latest_holdings.empty else []
+)
 
 # 買付不可銘柄は候補から先に落とす（EDINETの無料枠を消費しない）
 excluded_codes = load_excluded_codes()
 all_codes = candidate_codes(df_stocks)
-codes = [c for c in all_codes if str(c) not in excluded_codes]
+codes = [c for c in all_codes if str(c) not in excluded_codes | unknown_sector_codes]
 hit_excluded = sorted(excluded_codes & set(str(c) for c in all_codes))
 if hit_excluded:
     print(f"買付不可のため除外: {hit_excluded}")
@@ -235,7 +260,7 @@ code_map = build_code_map()
 dividend_cut_codes = get_dividend_cut_codes(codes, code_map=code_map)
 if dividend_cut_codes:
     print(f"減配予想のため除外: {sorted(dividend_cut_codes)}")
-cut_codes = dividend_cut_codes | excluded_codes
+cut_codes = dividend_cut_codes | excluded_codes | unknown_sector_codes
 
 # 保有銘柄の減配予想を検知する（性向条件なし・通知のみ。売る/持つの判断は人間が行う）
 held_codes = (
@@ -264,6 +289,9 @@ PICK_META_PATH = os.path.join(
 picked_meta = []
 
 warning_lines = []
+if unknown_sector_codes:
+    warning_lines.append(f"⚠️33業種が不明のため候補から除外: {', '.join(sorted(unknown_sector_codes))}")
+    warning_lines.append("")
 if held_reductions:
     warning_lines.append("⚠️保有銘柄の減配予想")
     for code_str, (actual, forecast) in sorted(held_reductions.items()):
@@ -350,6 +378,7 @@ try:
                 },
                 "減配予想で候補から除外": sorted(dividend_cut_codes),
                 "買付不可で候補から除外": hit_excluded,
+                "33業種が不明で候補から除外": sorted(unknown_sector_codes),
             },
             f,
             ensure_ascii=False,

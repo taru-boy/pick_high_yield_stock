@@ -1,17 +1,17 @@
 import pandas as pd
 
+from tse_sector import sector_of
 from watch_dividend import calculate_dividend_yield
 
 
-def get_holding_sector_dict(df_holding, codes):
+def get_holding_sector_dict(codes, sector_map):
     """
-    保有銘柄の証券コードに対応するセクターを辞書に格納する。
+    保有銘柄の証券コードに対応する東証33業種を辞書に格納する。
+
+    購入履歴タブの「セクター」列（買った時点の値）は見ない。区分を切り替えたときや
+    JPX 側で業種が変わったときに、古い値のまま20%上限を計算しないため。
     """
-    holding_sector_dict = {}
-    for _code in codes:
-        _sector = df_holding[df_holding["証券コード"] == _code]["セクター"].values[0]
-        holding_sector_dict[_code] = _sector
-    return holding_sector_dict
+    return {_code: sector_of(_code, sector_map) for _code in codes}
 
 
 def calculate_latest_holdings(

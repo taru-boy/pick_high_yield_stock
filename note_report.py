@@ -22,6 +22,7 @@ from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
 
 from stock_splits import load_splits, marker
+from tse_sector import load_sector_map
 
 matplotlib.use("Agg")  # 画面の無いcron環境でも動かす
 import matplotlib.pyplot as plt  # noqa: E402
@@ -69,6 +70,11 @@ CANDIDATES_CSV = os.path.join(BASE_DIR, "high_dividend_stocks.csv")
 # 元は note の有料記事への導線だったが、2026-09 にサイトへ移した（手順は Kindle 本に回す）。
 # 空のままなら CTA は出力しない（fail-safe：壊れたリンクを公開しないため）。
 FLAGSHIP_ARTICLE_URL = "https://tarubo-works.com/high-dividend-rules/"
+
+# 業種区分を日経の指数ページの業種（28種）から東証33業種へ切り替えた週の金曜。
+# 円グラフは毎週のスナップショットで履歴を持たないので、データは補正せず、
+# この日から7日間に作るレポートと素材メモにだけ注記を出す（前週の記事と見比べたときの断絶の説明）。
+SECTOR_SCHEME_CHANGED_ON = "2026-10-09"
 
 # 環境変数を読み込む（pick_high_yield_stock.py と同じ認証パターンを流用）
 load_dotenv(dotenv_path="/home/taru-boy/Desktop/get_stock/.env")
@@ -327,7 +333,7 @@ def build_composition_graphs(df_market):
         if not sector_cap.empty:
             sector_cap = _collapse_by_share(sector_cap)
             results.append(
-                _draw_pie(sector_cap, "セクター別構成", "Sector Allocation", "pie_sector")
+                _draw_pie(sector_cap, "業種別構成（東証33業種）", "Sector Allocation (TSE 33)", "pie_sector")
             )
     if "会社名" in dfm:
         holding_cap = dfm.groupby("会社名")["_cap"].sum()
@@ -664,6 +670,16 @@ def _pt(value):
     return f"{sign}{abs(value):.2f}pt"
 
 
+def _is_sector_switch_week(date_str):
+    """date_str が業種区分を切り替えた週（SECTOR_SCHEME_CHANGED_ON から7日間）か。"""
+    try:
+        changed_on = datetime.strptime(SECTOR_SCHEME_CHANGED_ON, "%Y-%m-%d")
+        day = datetime.strptime(date_str, "%Y-%m-%d")
+    except (TypeError, ValueError):
+        return False
+    return 0 <= (day - changed_on).days < 7
+
+
 def build_material_memo(df_holding, df_market, df_trend, date_str, index_summary):
     """所感の下書き用の素材メモ（Markdown 文字列）を組み立てる。
 
@@ -947,8 +963,24 @@ def build_material_memo(df_holding, df_market, df_trend, date_str, index_summary
         lines.append(
             f"- 買付不可（かぶミニ非対応など）で除外: {'、'.join(excluded) if excluded else 'なし'}"
         )
+        unknown = meta.get("33業種が不明で候補から除外") or []
+        if unknown:
+            lines.append(f"- 33業種が不明（対応表に無い）で除外: {'、'.join(unknown)}")
     else:
         lines.append("- 選定メタ情報がないため、減配・除外の情報はありません。")
+    if _is_sector_switch_week(date_str):
+        lines.append(
+            "- 業種区分の切り替え: 今週から東証33業種（以前は日経の指数ページの業種・28種）。"
+            "円グラフの業種が前週と違うのは区分を変えたためで、売買によるものではない。"
+        )
+        if df_market is not None and "セクター" in df_market:
+            held = set(df_market["セクター"].dropna()) - {""}
+            unheld = sorted(set(load_sector_map().values()) - held)
+            lines.append(
+                f"  - 33業種のうち保有 {len(held)}業種 / 未保有 {len(unheld)}業種"
+                f"（{' / '.join(unheld)}）。未保有業種の候補が利回り上位10か複数指数の重複銘柄に入れば、"
+                "その銘柄が優先して選ばれるようになる"
+            )
     lines.append("")
 
     return "\n".join(lines)
@@ -1077,6 +1109,12 @@ def build_markdown(df_holding, df_market, df_trend, graph_files, pie_files, date
     if pie_files:
         lines.append("## ポートフォリオの構成")
         lines.append("")
+        if _is_sector_switch_week(date_str):
+            lines.append(
+                "※ 今週から業種の区分を東証33業種に変えました（以前は日経の業種分類）。"
+                "前週までの円グラフとは業種の区切りが違います。"
+            )
+            lines.append("")
         for title, filename in pie_files:
             lines.append(f"![{title}]({filename})")
             lines.append("")
